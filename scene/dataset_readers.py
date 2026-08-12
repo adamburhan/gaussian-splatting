@@ -179,7 +179,15 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     if eval:
         if "360" in path:
             llffhold = 8
-        if llffhold:
+        # an explicit test list takes precedence over the LLFF every-Nth split,
+        # so the same held-out views can be enforced across reconstructions
+        # that register different image subsets
+        test_txt = os.path.join(path, "sparse/0", "test.txt")
+        if os.path.exists(test_txt):
+            print("------------TEST.TXT HOLD-------------")
+            with open(test_txt, 'r') as file:
+                test_cam_names_list = [line.strip() for line in file]
+        elif llffhold:
             print("------------LLFF HOLD-------------")
             cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]
             cam_names = sorted(cam_names)
