@@ -21,16 +21,15 @@ import torch
 import torch.nn.functional as F
 
 
-def extract_hypotheses(depth, threshold, window=13, dilation=0, min_gap_abs=0.1, min_gap_rel=0.05):
+def extract_hypotheses(depth, threshold, window=13, dilation=1, min_gap_abs=0.1, min_gap_rel=0.05):
     """Two-surface hypotheses from a metric depth map [h, w] (metres, 0 = no reading), at its own
     resolution. Returns (band, hyp_near, hyp_far): band marks pixels next to a discontinuity whose
     local near/far gap is meaningful; the hypotheses are the p90 / p10 of inverse depth in a
     window x window neighbourhood (percentiles rather than min/max so flying pixels do not count).
-    Both pixels across every jump are marked, so the band already spans the ramp plus one pixel on
-    each side before any dilation. Every band pixel's window must reach both surfaces: with a ramp
-    of r pixels and d pixels of dilation that is window >= 2 (r + d) + 3; 13 leaves margin for the
-    2-3 pixel ramps of the upsampled iPhone LiDAR. Hypotheses are float32 inverse depth (1/m), 0
-    outside the band."""
+    Both pixels across every jump are marked, so the band spans the ramp plus one pixel on each side
+    before the dilation. Every band pixel's window must reach both surfaces: with a ramp of r pixels
+    and d pixels of dilation that is window >= 2 (r + d) + 3; 13 covers the 2-3 pixel ramps of the
+    upsampled iPhone LiDAR. Hypotheses are float32 inverse depth (1/m), 0 outside the band."""
     valid = depth > 0
     inv = np.where(valid, 1.0 / np.maximum(depth, 1e-3), np.nan).astype(np.float32)
     logd = np.log(np.where(valid, depth, np.nan))
@@ -59,10 +58,13 @@ def extract_hypotheses(depth, threshold, window=13, dilation=0, min_gap_abs=0.1,
     hyp_far = np.zeros(depth.shape, dtype=np.float32)
     band = np.zeros(depth.shape, dtype=bool)
     if edge.any():
+        patches = patches.reshape(len(patches), -1)
+        missing = np.isnan(patches)  # no reading, or outside the image; must not become a percentile
         with np.errstate(all="ignore"):
-            far, near = np.nanpercentile(patches.reshape(len(patches), -1), [10, 90], axis=-1)  # low inverse depth = far
+            near = np.percentile(np.where(missing, -np.inf, patches), 90, axis=-1)  # high inverse depth = near
+            far = np.percentile(np.where(missing, np.inf, patches), 10, axis=-1)
             gap = 1.0 / far - 1.0 / near  # metres between the two surfaces
-            meaningful = np.isfinite(gap) & ((gap > min_gap_abs) | (gap > min_gap_rel / near))
+            meaningful = np.isfinite(gap) & (far > 0) & ((gap > min_gap_abs) | (gap > min_gap_rel / near))
         rows, cols = np.nonzero(edge)
         band[rows[meaningful], cols[meaningful]] = True
         hyp_near[rows[meaningful], cols[meaningful]] = near[meaningful]
