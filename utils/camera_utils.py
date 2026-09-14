@@ -86,8 +86,11 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 
     if invdepthmap is not None and cam_info.depth_unit == "mm":
         # sensor depth (e.g. 256x192 iPhone LiDAR) reaches the training resolution here by nearest
-        # neighbour so depth edges are not blended; Camera's linear resize is then the identity
-        invdepthmap = resample(invdepthmap, cam_info.intrinsics, resolution, cv2.INTER_NEAREST)
+        # neighbour so depth edges are not blended; Camera's linear resize is then the identity.
+        # It is not undistorted: on ScanNet++ the depth stream is already aligned to the rectified
+        # pinhole camera K while only the RGB frames carry the OPENCV distortion (verified against
+        # the COLMAP points: colour agreement peaks at full distortion, depth agreement at none)
+        invdepthmap = cv2.resize(invdepthmap, resolution, interpolation=cv2.INTER_NEAREST)
 
     principal_point = None
     if cam_info.intrinsics is not None:
