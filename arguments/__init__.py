@@ -56,6 +56,10 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
+        # depth observation model (utils/observation_model.py): unimodal is the native inverse-depth L1;
+        # masked / bimodal need the discontinuity band, extracted from sensor depth with band_threshold
+        self.observation_model = "unimodal"
+        self.band_threshold = 0.05
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

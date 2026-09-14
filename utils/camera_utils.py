@@ -14,6 +14,7 @@ import numpy as np
 from utils.graphics_utils import fov2focal
 from PIL import Image
 import cv2
+from utils.observation_model import extract_hypotheses
 
 WARNED = False
 
@@ -22,11 +23,14 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
     if cam_info.mask_path != "":
         image.putalpha(Image.open(cam_info.mask_path).convert("L"))  # PILtoTorch hands a 4th channel to Camera as alpha_mask
 
+    hypotheses = None
     if cam_info.depth_path != "":
         try:
             if cam_info.depth_unit == "mm":
                 depth = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 1000
                 invdepthmap = np.where(depth > 0, 1 / np.maximum(depth, 1e-3), 0).astype(np.float32)
+                if args.observation_model != "unimodal":
+                    hypotheses = extract_hypotheses(depth, args.band_threshold)
             elif is_nerf_synthetic:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 512
             else:
@@ -80,7 +84,7 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
                   image=image, invdepthmap=invdepthmap,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
                   train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test,
-                  principal_point=principal_point)
+                  principal_point=principal_point, hypotheses=hypotheses)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
     camera_list = []

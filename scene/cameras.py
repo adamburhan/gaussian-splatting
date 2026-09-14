@@ -21,7 +21,7 @@ class Camera(nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  train_test_exp = False, is_test_dataset = False, is_test_view = False,
-                 principal_point = None
+                 principal_point = None, hypotheses = None
                  ):
         super(Camera, self).__init__()
 
@@ -79,6 +79,12 @@ class Camera(nn.Module):
                     self.invdepthmap = self.invdepthmap * depth_params["scale"] + depth_params["offset"]
 
             self.invdepthmap = torch.from_numpy(self.invdepthmap[None]).to(self.data_device)
+
+        if hypotheses is not None:
+            band, hyp_near, hyp_far = hypotheses
+            self.band = torch.from_numpy(band[None].astype(np.float32)).to(self.data_device)
+            self.hyp_near = torch.from_numpy(hyp_near[None]).to(self.data_device)
+            self.hyp_far = torch.from_numpy(hyp_far[None]).to(self.data_device)
 
         self.zfar = 100.0
         self.znear = 0.01
