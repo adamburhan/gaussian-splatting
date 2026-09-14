@@ -36,6 +36,12 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     is_test: bool
+    mask_path: str = ""
+    # full-resolution fx, fy, cx, cy, width, height and OPENCV distortion (None: already pinhole);
+    # None keeps the symmetric pinhole projection of the native readers
+    intrinsics: dict = None
+    # "encoded": 16-bit inverse depth as written by the native pipeline; "mm": metric sensor depth
+    depth_unit: str = "encoded"
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -317,7 +323,63 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
                            is_nerf_synthetic=True)
     return scene_info
 
+def readScannetppInfo(path, depths):
+    """ScanNet++ iPhone NVS benchmark: train on the registered iPhone frames, test on the held-out
+    DSLR views that the official toolbox undistorted with the iPhone intrinsics. Both COLMAP models
+    are expressed in the scan's world frame, so their poses can be mixed directly."""
+    iphone = os.path.join(path, "iphone")
+    camera = list(read_intrinsics_text(os.path.join(iphone, "colmap/cameras.txt")).values())[0]
+    fx, fy, cx, cy = camera.params[:4]
+    intrinsics = dict(fx=fx, fy=fy, cx=cx, cy=cy, width=camera.width, height=camera.height,
+                      distortion=camera.params[4:] if camera.model == "OPENCV" else None)
+    FovX = focal2fov(fx, camera.width)
+    FovY = focal2fov(fy, camera.height)
+
+    def camera_info(extr, folder, images, masks, depth_path, is_test, intrinsics):
+        stem = os.path.splitext(extr.name)[0]
+        return CameraInfo(uid=extr.id, R=np.transpose(qvec2rotmat(extr.qvec)), T=np.array(extr.tvec),
+                          FovY=FovY, FovX=FovX, depth_params=None,
+                          image_path=os.path.join(folder, images, extr.name), image_name=extr.name,
+                          depth_path=depth_path, width=camera.width, height=camera.height, is_test=is_test,
+                          mask_path=os.path.join(folder, masks, stem + ".png"), intrinsics=intrinsics,
+                          depth_unit="mm")
+
+    train_cam_infos = []
+    for extr in read_extrinsics_text(os.path.join(iphone, "colmap/images.txt")).values():
+        stem = os.path.splitext(extr.name)[0]
+        depth_path = os.path.join(path, depths, stem + ".png") if depths != "" else ""
+        train_cam_infos.append(camera_info(extr, iphone, "rgb", "rgb_masks", depth_path, False, intrinsics))
+
+    dslr = os.path.join(path, "dslr_undistorted_by_iphone")
+    with open(os.path.join(dslr, "nerfstudio/transforms.json")) as f:
+        test_names = {frame["file_path"] for frame in json.load(f)["test_frames"]}
+    pinhole = dict(intrinsics, distortion=None)
+    test_cam_infos = []
+    for extr in read_extrinsics_text(os.path.join(path, "dslr/colmap/images.txt")).values():
+        if extr.name in test_names:
+            test_cam_infos.append(camera_info(extr, dslr, "resized_images", "resized_anon_masks", "", True, pinhole))
+    assert len(test_cam_infos) == len(test_names), "DSLR test frames missing from dslr/colmap/images.txt"
+
+    train_cam_infos.sort(key=lambda c: c.image_name)
+    test_cam_infos.sort(key=lambda c: c.image_name)
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(iphone, "colmap/points3D.ply")
+    if not os.path.exists(ply_path):
+        xyz, rgb, _ = read_points3D_text(os.path.join(iphone, "colmap/points3D.txt"))
+        storePly(ply_path + f".{os.getpid()}", xyz, rgb)
+        os.replace(ply_path + f".{os.getpid()}", ply_path)  # scenes train in parallel; the swap is atomic
+    pcd = fetchPly(ply_path)
+
+    return SceneInfo(point_cloud=pcd,
+                     train_cameras=train_cam_infos,
+                     test_cameras=test_cam_infos,
+                     nerf_normalization=nerf_normalization,
+                     ply_path=ply_path,
+                     is_nerf_synthetic=False)
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "Scannetpp": readScannetppInfo
 }

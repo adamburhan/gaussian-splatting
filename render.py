@@ -14,6 +14,7 @@ from scene import Scene
 import os
 from tqdm import tqdm
 from os import makedirs
+import numpy as np
 from gaussian_renderer import render
 import torchvision
 from utils.general_utils import safe_state
@@ -29,26 +30,28 @@ except:
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+    depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "invdepth")
 
     makedirs(render_path, exist_ok=True)
-    makedirs(gts_path, exist_ok=True)
+    makedirs(depth_path, exist_ok=True)
 
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        rendering = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
-        gt = view.original_image[0:3, :, :]
+    # files keep the source image names so benchmark evaluators can pair them with their ground truth;
+    # ground truth is not copied, the rendered accumulated inverse depth is saved for geometry evaluation
+    for view in tqdm(views, desc="Rendering progress"):
+        render_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
+        rendering = render_pkg["render"]
 
         if args.train_test_exp:
             rendering = rendering[..., rendering.shape[-1] // 2:]
-            gt = gt[..., gt.shape[-1] // 2:]
 
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        stem = os.path.splitext(view.image_name)[0]
+        torchvision.utils.save_image(rendering, os.path.join(render_path, stem + ".png"))
+        np.save(os.path.join(depth_path, stem + ".npy"), render_pkg["depth"][0].cpu().numpy())
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_train_cameras=not skip_train)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")

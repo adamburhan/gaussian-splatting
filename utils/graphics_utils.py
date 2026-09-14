@@ -48,7 +48,10 @@ def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     Rt = np.linalg.inv(C2W)
     return np.float32(Rt)
 
-def getProjectionMatrix(znear, zfar, fovX, fovY):
+def getProjectionMatrix(znear, zfar, fovX, fovY, principal_point=None):
+    """principal_point: (cx / width, cy / height); None is the symmetric frustum (0.5, 0.5)."""
+    if principal_point is None:
+        principal_point = (0.5, 0.5)
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))
 
@@ -63,8 +66,9 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
 
     P[0, 0] = 2.0 * znear / (right - left)
     P[1, 1] = 2.0 * znear / (top - bottom)
-    P[0, 2] = (right + left) / (right - left)
-    P[1, 2] = (top + bottom) / (top - bottom)
+    # NDC offset of the optical axis; the rasterizer maps NDC -1..1 onto pixel centres -0.5..S-0.5
+    P[0, 2] = 2 * principal_point[0] - 1
+    P[1, 2] = 2 * principal_point[1] - 1
     P[3, 2] = z_sign
     P[2, 2] = z_sign * zfar / (zfar - znear)
     P[2, 3] = -(zfar * znear) / (zfar - znear)
