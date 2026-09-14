@@ -37,8 +37,7 @@ class CameraInfo(NamedTuple):
     height: int
     is_test: bool
     mask_path: str = ""
-    # full-resolution fx, fy, cx, cy, width, height and OPENCV distortion (None: already pinhole);
-    # None keeps the symmetric pinhole projection of the native readers
+    # full-resolution fx, fy, cx, cy, width, height; None keeps the symmetric pinhole projection of the native readers
     intrinsics: dict = None
     # "encoded": 16-bit inverse depth as written by the native pipeline; "mm": metric sensor depth
     depth_unit: str = "encoded"
@@ -326,12 +325,14 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
 def readScannetppInfo(path, depths):
     """ScanNet++ iPhone NVS benchmark: train on the registered iPhone frames, test on the held-out
     DSLR views that the official toolbox undistorted with the iPhone intrinsics. Both COLMAP models
-    are expressed in the scan's world frame, so their poses can be mixed directly."""
+    are expressed in the scan's world frame, so their poses can be mixed directly.
+    The iPhone camera is treated as the pinhole K, as the toolbox does: the OPENCV coefficients in
+    cameras.txt do not describe the extracted frames (long edges are straight to <0.6 px where the model
+    predicts ~2 px of bow, and undistorting worsens depth-based reprojection at the periphery)."""
     iphone = os.path.join(path, "iphone")
     camera = list(read_intrinsics_text(os.path.join(iphone, "colmap/cameras.txt")).values())[0]
     fx, fy, cx, cy = camera.params[:4]
-    intrinsics = dict(fx=fx, fy=fy, cx=cx, cy=cy, width=camera.width, height=camera.height,
-                      distortion=camera.params[4:] if camera.model == "OPENCV" else None)
+    intrinsics = dict(fx=fx, fy=fy, cx=cx, cy=cy, width=camera.width, height=camera.height)
     FovX = focal2fov(fx, camera.width)
     FovY = focal2fov(fy, camera.height)
 
@@ -353,11 +354,10 @@ def readScannetppInfo(path, depths):
     dslr = os.path.join(path, "dslr_undistorted_by_iphone")
     with open(os.path.join(dslr, "nerfstudio/transforms.json")) as f:
         test_names = {frame["file_path"] for frame in json.load(f)["test_frames"]}
-    pinhole = dict(intrinsics, distortion=None)
     test_cam_infos = []
     for extr in read_extrinsics_text(os.path.join(path, "dslr/colmap/images.txt")).values():
         if extr.name in test_names:
-            test_cam_infos.append(camera_info(extr, dslr, "resized_images", "resized_anon_masks", "", True, pinhole))
+            test_cam_infos.append(camera_info(extr, dslr, "resized_images", "resized_anon_masks", "", True, intrinsics))
     assert len(test_cam_infos) == len(test_names), "DSLR test frames missing from dslr/colmap/images.txt"
 
     train_cam_infos.sort(key=lambda c: c.image_name)
