@@ -44,7 +44,8 @@ class Camera(nn.Module):
         gt_image = resized_image_rgb[:3, ...]
         self.alpha_mask = None
         if resized_image_rgb.shape[0] == 4:
-            self.alpha_mask = resized_image_rgb[3:4, ...].to(self.data_device)
+            # clone: a view would keep the full 4-channel float image alive for the whole run
+            self.alpha_mask = resized_image_rgb[3:4, ...].clone().to(self.data_device)
         else: 
             self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to(self.data_device))
 
