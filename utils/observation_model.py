@@ -58,13 +58,15 @@ def extract_hypotheses(depth, threshold, window=13, dilation=1, min_gap_abs=0.1,
     hyp_far = np.zeros(depth.shape, dtype=np.float32)
     band = np.zeros(depth.shape, dtype=bool)
     if edge.any():
-        patches = patches.reshape(len(patches), -1)
-        missing = np.isnan(patches)  # no reading, or outside the image; must not become a percentile
+        # nearest-rank percentiles over the valid samples of each window (NaN sorts last)
+        ordered = np.sort(patches.reshape(len(patches), -1), axis=-1)
+        count = np.isfinite(ordered).sum(-1)
+        rows = np.arange(len(ordered))
+        near = ordered[rows, np.round(0.9 * (count - 1)).clip(0).astype(int)]  # high inverse depth = near
+        far = ordered[rows, np.round(0.1 * (count - 1)).clip(0).astype(int)]
         with np.errstate(all="ignore"):
-            near = np.percentile(np.where(missing, -np.inf, patches), 90, axis=-1)  # high inverse depth = near
-            far = np.percentile(np.where(missing, np.inf, patches), 10, axis=-1)
             gap = 1.0 / far - 1.0 / near  # metres between the two surfaces
-            meaningful = np.isfinite(gap) & (far > 0) & ((gap > min_gap_abs) | (gap > min_gap_rel / near))
+            meaningful = np.isfinite(gap) & ((gap > min_gap_abs) | (gap > min_gap_rel / near))
         rows, cols = np.nonzero(edge)
         band[rows[meaningful], cols[meaningful]] = True
         hyp_near[rows[meaningful], cols[meaningful]] = near[meaningful]
