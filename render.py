@@ -31,15 +31,22 @@ except:
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "invdepth")
+    alpha_path = os.path.join(model_path, name, "ours_{}".format(iteration), "alpha")
 
     makedirs(render_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
+    makedirs(alpha_path, exist_ok=True)
 
     # files keep the source image names so benchmark evaluators can pair them with their ground truth;
-    # ground truth is not copied, the rendered accumulated inverse depth is saved for geometry evaluation
+    # ground truth is not copied. For geometry evaluation the accumulated inverse depth sum(alpha T / z)
+    # is saved together with the accumulated opacity sum(alpha T), obtained by rasterizing unit colours
+    # over a black background (the rasterizer has no alpha output).
+    ones = torch.ones_like(gaussians.get_xyz)
+    black = torch.zeros(3, dtype=torch.float32, device="cuda")
     for view in tqdm(views, desc="Rendering progress"):
         render_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
         rendering = render_pkg["render"]
+        alpha = render(view, gaussians, pipeline, black, override_color=ones, separate_sh=separate_sh)["render"][0]
 
         if args.train_test_exp:
             rendering = rendering[..., rendering.shape[-1] // 2:]
@@ -47,6 +54,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         stem = os.path.splitext(view.image_name)[0]
         torchvision.utils.save_image(rendering, os.path.join(render_path, stem + ".png"))
         np.save(os.path.join(depth_path, stem + ".npy"), render_pkg["depth"][0].cpu().numpy())
+        np.save(os.path.join(alpha_path, stem + ".npy"), alpha.cpu().numpy())
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
