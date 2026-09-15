@@ -14,7 +14,7 @@ import numpy as np
 from utils.graphics_utils import fov2focal
 from PIL import Image
 import cv2
-from utils.observation_model import extract_hypotheses
+from utils.observation_model import extract_hypotheses, NEEDS_HYPOTHESES
 
 WARNED = False
 
@@ -29,7 +29,7 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
             if cam_info.depth_unit == "mm":
                 depth = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 1000
                 invdepthmap = np.where(depth > 0, 1 / np.maximum(depth, 1e-3), 0).astype(np.float32)
-                if args.observation_model != "unimodal":
+                if args.observation_model in NEEDS_HYPOTHESES:
                     hypotheses = extract_hypotheses(depth, args.band_threshold)
             elif is_nerf_synthetic:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 512

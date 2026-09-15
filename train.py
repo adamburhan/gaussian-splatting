@@ -17,7 +17,7 @@ from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
-from utils.observation_model import depth_residual
+from utils.observation_model import depth_residual, distributional_residual, render_moments, DISTRIBUTIONAL
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -129,8 +129,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Depth regularization
         Ll1depth_pure = 0.0
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-            invDepth = render_pkg["depth"]
-            Ll1depth_pure = depth_residual(invDepth, viewpoint_cam, dataset.observation_model).mean()
+            if dataset.observation_model in DISTRIBUTIONAL:
+                moments = render_moments(viewpoint_cam, gaussians, pipe, SPARSE_ADAM_AVAILABLE, dataset.observation_model)
+                Ll1depth_pure = distributional_residual(moments, viewpoint_cam, dataset.observation_model).mean()
+            else:
+                invDepth = render_pkg["depth"]
+                Ll1depth_pure = depth_residual(invDepth, viewpoint_cam, dataset.observation_model).mean()
             Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
             loss += Ll1depth
             Ll1depth = Ll1depth.item()

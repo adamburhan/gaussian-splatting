@@ -57,7 +57,8 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         # depth observation model (utils/observation_model.py): unimodal is the native inverse-depth L1;
-        # masked / bimodal need the discontinuity band, extracted from sensor depth with band_threshold
+        # masked / bimodal / bimodal_dist need the discontinuity band, extracted from sensor depth with
+        # band_threshold; unimodal_dist / bimodal_dist act on rendered moments of the ray distribution
         self.observation_model = "unimodal"
         self.band_threshold = 0.05
         super().__init__(parser, "Loading Parameters", sentinel)
