@@ -61,6 +61,7 @@ class ModelParams(ParamGroup):
         # band_threshold; unimodal_dist / bimodal_dist act on rendered moments of the ray distribution
         self.observation_model = "unimodal"
         self.band_threshold = 0.05
+        self.spread_tolerance = 0.05  # unimodal_dist_tau: free RMS spread as a fraction of the sensor inverse depth
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

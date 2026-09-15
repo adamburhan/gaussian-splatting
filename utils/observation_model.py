@@ -28,6 +28,13 @@ what the native D = sum_i w_i u_i already assumes, and it is what makes an under
 its transparency instead of escaping supervision. Units are inverse depth, like the native residual,
 so the native weight schedule applies.
 
+Three ablations isolate what the pilot could not: bimodal_dist_band keeps the quartic in the band but
+the native |D - s| outside, so the off-band term is bit-for-bit the unimodal arm; bimodal_max replaces
+the quartic by the max-mixture  min_j sqrt( E_w[(u - h_j)^2] )  whose zero set is "all mass on one of
+the two surfaces" (the quartic also accepts any near / far mixture, whose mean is a phantom middle);
+unimodal_dist_tau gives the spread a dead zone, sqrt( max(0, E_w[(u - s)^2] - (tau s)^2) ), so a surface
+made of several Gaussians within an RMS thickness of tau relative depth costs nothing.
+
 This module depends on numpy and torch only so it can be unit-tested outside the training environment.
 """
 
@@ -112,8 +119,9 @@ def depth_residual(invdepth, cam, model):
     raise ValueError(f"unknown observation model {model!r}")
 
 
-DISTRIBUTIONAL = ("unimodal_dist", "bimodal_dist")
-NEEDS_HYPOTHESES = ("masked", "bimodal", "bimodal_dist")
+DISTRIBUTIONAL = ("unimodal_dist", "unimodal_dist_tau", "bimodal_dist", "bimodal_dist_band", "bimodal_max")
+NEEDS_HYPOTHESES = ("masked", "bimodal", "bimodal_dist", "bimodal_dist_band", "bimodal_max")
+QUARTIC = ("bimodal_dist", "bimodal_dist_band")  # need M3, M4 as well
 
 
 def inverse_depths(cam, xyz):
@@ -126,8 +134,8 @@ def inverse_depths(cam, xyz):
 
 def render_moments(cam, gaussians, pipe, separate_sh, model):
     """Moments M_k = sum_i w_i u_i^k of the ray distribution over inverse depth, rendered as colours over
-    a black background: M1, M2 for unimodal_dist; M1..M4 for bimodal_dist. Values are [H, W]. The
-    background completes the distribution at u = 0, so no opacity channel is needed."""
+    a black background: M1, M2 in one pass, M3, M4 in a second one for the quartic models. Values are
+    [H, W]. The background completes the distribution at u = 0, so no opacity channel is needed."""
     from gaussian_renderer import render  # training-environment import, kept out of the module scope
 
     u = inverse_depths(cam, gaussians.get_xyz)
@@ -136,7 +144,7 @@ def render_moments(cam, gaussians, pipe, separate_sh, model):
     def pass_(channels):
         return render(cam, gaussians, pipe, black, override_color=torch.stack(channels, 1), separate_sh=separate_sh)["render"]
 
-    if model == "unimodal_dist":
+    if model not in QUARTIC:
         m = pass_([u, u * u, u * u])
         return dict(M1=m[0], M2=m[1])
     m = pass_([u, u * u, u * u * u])
@@ -144,10 +152,11 @@ def render_moments(cam, gaussians, pipe, separate_sh, model):
     return dict(M1=m[0], M2=m[1], M3=m[2], M4=n[0])
 
 
-def distributional_residual(moments, cam, model):
+def distributional_residual(moments, cam, model, spread_tolerance=0.05):
     """Per-pixel residual [1, H, W] of the distributional observation models from rendered moments.
     The expectation runs over the completed ray distribution (background at u = 0), so the zeroth
-    moment is 1 and a pixel pays for the mass it lacks."""
+    moment is 1 and a pixel pays for the mass it lacks. spread_tolerance is the dead zone of
+    unimodal_dist_tau, as a fraction of the sensor inverse depth."""
     M1, M2 = moments["M1"], moments["M2"]
     device = M1.device
     target = cam.invdepthmap.to(device)[0]
@@ -156,16 +165,28 @@ def distributional_residual(moments, cam, model):
     def at_render_size(t):
         return F.interpolate(t.to(device)[None], size=M1.shape, mode="nearest")[0, 0]
 
+    def rms(spread):
+        return torch.sqrt(spread.clamp(min=0) + 1e-8)
+
     spread = M2 - 2 * target * M1 + target * target  # E[(u - s)^2]
-    unimodal = torch.sqrt(spread.clamp(min=0) + 1e-8)
+    if model == "unimodal_dist_tau":
+        return (rms(spread - (spread_tolerance * target) ** 2) * valid)[None]
+    unimodal = rms(spread)
     if model == "unimodal_dist":
         return (unimodal * valid)[None]
-    if model != "bimodal_dist":
+    if model not in ("bimodal_dist", "bimodal_dist_band", "bimodal_max"):
         raise ValueError(f"unknown distributional observation model {model!r}")
     band = at_render_size(cam.band)
     a, b = at_render_size(cam.hyp_near), at_render_size(cam.hyp_far)
-    M3, M4 = moments["M3"], moments["M4"]
-    # E[(u - a)^2 (u - b)^2] expanded in the moments
-    quartic = M4 - 2 * (a + b) * M3 + (a * a + 4 * a * b + b * b) * M2 - 2 * a * b * (a + b) * M1 + a * a * b * b
-    bimodal = torch.sqrt(quartic.clamp(min=0) + 1e-8) / (b - a).abs().clamp(min=1e-3)
-    return (torch.where(band > 0, bimodal, unimodal) * valid)[None]
+    if model == "bimodal_max":
+        # the better of the two single-surface explanations: zero only if all mass sits on one of them
+        bimodal = rms(torch.minimum(M2 - 2 * a * M1 + a * a, M2 - 2 * b * M1 + b * b))
+    else:
+        M3, M4 = moments["M3"], moments["M4"]
+        # E[(u - a)^2 (u - b)^2] expanded in the moments
+        quartic = M4 - 2 * (a + b) * M3 + (a * a + 4 * a * b + b * b) * M2 - 2 * a * b * (a + b) * M1 + a * a * b * b
+        bimodal = rms(quartic) / (b - a).abs().clamp(min=1e-3)
+    # outside the band: the native L1 on the mean (M1 is the rendered inverse depth D), except for
+    # bimodal_dist which keeps the spread penalty everywhere
+    outside = unimodal if model == "bimodal_dist" else torch.abs(M1 - target)
+    return (torch.where(band > 0, bimodal, outside) * valid)[None]

@@ -131,7 +131,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
             if dataset.observation_model in DISTRIBUTIONAL:
                 moments = render_moments(viewpoint_cam, gaussians, pipe, SPARSE_ADAM_AVAILABLE, dataset.observation_model)
-                Ll1depth_pure = distributional_residual(moments, viewpoint_cam, dataset.observation_model).mean()
+                Ll1depth_pure = distributional_residual(moments, viewpoint_cam, dataset.observation_model, dataset.spread_tolerance).mean()
             else:
                 invDepth = render_pkg["depth"]
                 Ll1depth_pure = depth_residual(invDepth, viewpoint_cam, dataset.observation_model).mean()
