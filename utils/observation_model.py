@@ -23,7 +23,10 @@ the observation model on every Gaussian and take the expectation under the ray d
 
 which needs only the moments M_k = sum_i w_i u_i^k. Those come out of the unmodified rasterizer by
 rendering u^k as colours (render_moments), so gradients reach positions through u and opacities
-through w. Units are inverse depth, like the native residual, so the native weight schedule applies.
+through w. The missing mass 1 - sum_i w_i is the background, an atom at u = 0 (infinitely far): that is
+what the native D = sum_i w_i u_i already assumes, and it is what makes an under-covered pixel pay for
+its transparency instead of escaping supervision. Units are inverse depth, like the native residual,
+so the native weight schedule applies.
 
 This module depends on numpy and torch only so it can be unit-tested outside the training environment.
 """
@@ -122,38 +125,38 @@ def inverse_depths(cam, xyz):
 
 
 def render_moments(cam, gaussians, pipe, separate_sh, model):
-    """Moments of the ray distribution over inverse depth, rendered as colours over a black background:
-    M1, M2 and A for unimodal_dist; M1..M4 and A for bimodal_dist. Values are [H, W]."""
+    """Moments M_k = sum_i w_i u_i^k of the ray distribution over inverse depth, rendered as colours over
+    a black background: M1, M2 for unimodal_dist; M1..M4 for bimodal_dist. Values are [H, W]. The
+    background completes the distribution at u = 0, so no opacity channel is needed."""
     from gaussian_renderer import render  # training-environment import, kept out of the module scope
 
     u = inverse_depths(cam, gaussians.get_xyz)
-    ones = torch.ones_like(u)
     black = torch.zeros(3, dtype=torch.float32, device=u.device)
 
     def pass_(channels):
         return render(cam, gaussians, pipe, black, override_color=torch.stack(channels, 1), separate_sh=separate_sh)["render"]
 
     if model == "unimodal_dist":
-        m = pass_([u, u * u, ones])
-        return dict(M1=m[0], M2=m[1], A=m[2])
+        m = pass_([u, u * u, u * u])
+        return dict(M1=m[0], M2=m[1])
     m = pass_([u, u * u, u * u * u])
-    n = pass_([u * u * u * u, ones, ones])
-    return dict(M1=m[0], M2=m[1], M3=m[2], M4=n[0], A=n[1])
+    n = pass_([u * u * u * u, u, u])
+    return dict(M1=m[0], M2=m[1], M3=m[2], M4=n[0])
 
 
-def distributional_residual(moments, cam, model, eps=1e-3):
-    """Per-pixel residual [1, H, W] of the distributional observation models from rendered moments."""
-    A = moments["A"]
-    device = A.device
+def distributional_residual(moments, cam, model):
+    """Per-pixel residual [1, H, W] of the distributional observation models from rendered moments.
+    The expectation runs over the completed ray distribution (background at u = 0), so the zeroth
+    moment is 1 and a pixel pays for the mass it lacks."""
+    M1, M2 = moments["M1"], moments["M2"]
+    device = M1.device
     target = cam.invdepthmap.to(device)[0]
     valid = cam.depth_mask.to(device)[0]
-    norm = A + eps  # empty pixels get no depth gradient; opacity is left to the photometric loss
 
     def at_render_size(t):
-        return F.interpolate(t.to(device)[None], size=A.shape, mode="nearest")[0, 0]
+        return F.interpolate(t.to(device)[None], size=M1.shape, mode="nearest")[0, 0]
 
-    M1, M2 = moments["M1"], moments["M2"]
-    spread = (M2 - 2 * target * M1 + target * target * A) / norm  # E_w[(u - s)^2]
+    spread = M2 - 2 * target * M1 + target * target  # E[(u - s)^2]
     unimodal = torch.sqrt(spread.clamp(min=0) + 1e-8)
     if model == "unimodal_dist":
         return (unimodal * valid)[None]
@@ -162,7 +165,7 @@ def distributional_residual(moments, cam, model, eps=1e-3):
     band = at_render_size(cam.band)
     a, b = at_render_size(cam.hyp_near), at_render_size(cam.hyp_far)
     M3, M4 = moments["M3"], moments["M4"]
-    # E_w[(u - a)^2 (u - b)^2] expanded in the moments
-    quartic = (M4 - 2 * (a + b) * M3 + (a * a + 4 * a * b + b * b) * M2 - 2 * a * b * (a + b) * M1 + a * a * b * b * A) / norm
+    # E[(u - a)^2 (u - b)^2] expanded in the moments
+    quartic = M4 - 2 * (a + b) * M3 + (a * a + 4 * a * b + b * b) * M2 - 2 * a * b * (a + b) * M1 + a * a * b * b
     bimodal = torch.sqrt(quartic.clamp(min=0) + 1e-8) / (b - a).abs().clamp(min=1e-3)
     return (torch.where(band > 0, bimodal, unimodal) * valid)[None]
