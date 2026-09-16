@@ -18,6 +18,7 @@ import numpy as np
 from gaussian_renderer import render
 import torchvision
 from utils.general_utils import safe_state
+from utils.observation_model import inverse_depths
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
@@ -29,31 +30,34 @@ except:
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "invdepth")
-    alpha_path = os.path.join(model_path, name, "ours_{}".format(iteration), "alpha")
-
-    makedirs(render_path, exist_ok=True)
-    makedirs(depth_path, exist_ok=True)
-    makedirs(alpha_path, exist_ok=True)
+    out = os.path.join(model_path, name, "ours_{}".format(iteration))
+    render_path, invdepth_path, depth_path, alpha_path = (os.path.join(out, d) for d in ("renders", "invdepth", "depth", "alpha"))
+    for d in (render_path, invdepth_path, depth_path, alpha_path):
+        makedirs(d, exist_ok=True)
 
     # files keep the source image names so benchmark evaluators can pair them with their ground truth;
-    # ground truth is not copied. For geometry evaluation the accumulated inverse depth sum(alpha T / z)
-    # is saved together with the accumulated opacity sum(alpha T), obtained by rasterizing unit colours
-    # over a black background (the rasterizer has no alpha output).
-    ones = torch.ones_like(gaussians.get_xyz)
+    # ground truth is not copied. For geometry evaluation three maps are saved: the rasterizer's
+    # accumulated inverse depth sum(w / z) (invdepth), the accumulated opacity sum(w) (alpha) and the
+    # opacity-normalised expected depth sum(w z) / sum(w) in metres (depth, 0 where nothing is
+    # rendered), the convention of DN-Splatter / gsplat "ED". The last two come from one extra
+    # unclamped pass rasterizing [1, z, z] as colours over a black background.
     black = torch.zeros(3, dtype=torch.float32, device="cuda")
     for view in tqdm(views, desc="Rendering progress"):
         render_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
         rendering = render_pkg["render"]
-        alpha = render(view, gaussians, pipeline, black, override_color=ones, separate_sh=separate_sh)["render"][0]
+        z = 1.0 / inverse_depths(view, gaussians.get_xyz)  # view-space depth of each centre
+        accumulated = render(view, gaussians, pipeline, black, override_color=torch.stack([torch.ones_like(z), z, z], 1),
+                             separate_sh=separate_sh, clamp_output=False)["render"]
+        alpha, z_sum = accumulated[0], accumulated[1]
+        expected_depth = torch.where(alpha > 1e-3, z_sum / alpha.clamp(min=1e-3), torch.zeros_like(alpha))
 
         if args.train_test_exp:
             rendering = rendering[..., rendering.shape[-1] // 2:]
 
         stem = os.path.splitext(view.image_name)[0]
         torchvision.utils.save_image(rendering, os.path.join(render_path, stem + ".png"))
-        np.save(os.path.join(depth_path, stem + ".npy"), render_pkg["depth"][0].cpu().numpy())
+        np.save(os.path.join(invdepth_path, stem + ".npy"), render_pkg["depth"][0].cpu().numpy())
+        np.save(os.path.join(depth_path, stem + ".npy"), expected_depth.cpu().numpy())
         np.save(os.path.join(alpha_path, stem + ".npy"), alpha.cpu().numpy())
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
