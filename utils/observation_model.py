@@ -142,7 +142,8 @@ def render_moments(cam, gaussians, pipe, separate_sh, model):
     black = torch.zeros(3, dtype=torch.float32, device=u.device)
 
     def pass_(channels):
-        return render(cam, gaussians, pipe, black, override_color=torch.stack(channels, 1), separate_sh=separate_sh)["render"]
+        return render(cam, gaussians, pipe, black, override_color=torch.stack(channels, 1), separate_sh=separate_sh,
+                      clamp_output=False)["render"]  # the renderer clamps colours to [0, 1]; moments of u = 1/z exceed 1 below 1 m
 
     if model not in QUARTIC:
         m = pass_([u, u * u, u * u])
