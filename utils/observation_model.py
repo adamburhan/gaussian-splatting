@@ -138,7 +138,7 @@ def render_moments(cam, gaussians, pipe, separate_sh, model):
     [H, W]. The background completes the distribution at u = 0, so no opacity channel is needed."""
     from gaussian_renderer import render  # training-environment import, kept out of the module scope
 
-    u = inverse_depths(cam, gaussians.get_xyz)
+    u = inverse_depths(cam, gaussians.get_xyz_all)  # override colours must cover the frozen set too
     black = torch.zeros(3, dtype=torch.float32, device=u.device)
 
     def pass_(channels):

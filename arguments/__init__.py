@@ -51,6 +51,10 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self._images = "images"
         self._depths = ""
+        self.depth_unit = "encoded"  # "mm": metric uint16 depth PNGs (COLMAP reader; no depth_params.json)
+        # Gaussians (Graphdeco PLY) rendered together with the optimised ones but never optimised,
+        # densified, pruned or opacity-reset: an oracle / prior shape whose appearance stays at its init
+        self._frozen_ply = ""
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False

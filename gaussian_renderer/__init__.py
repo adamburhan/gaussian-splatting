@@ -22,8 +22,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     Background tensor (bg_color) must be on GPU!
     """
  
+    # Gaussians of pc.frozen (--frozen_ply) are rasterized after the optimised ones; everything indexed per
+    # Gaussian on the way out (radii, visibility) is cut back to the optimised prefix
+    frozen = pc.frozen
+    n_live = pc.get_xyz.shape[0]
+
+    def cat(attribute):
+        live = getattr(pc, attribute)
+        return live if frozen is None else torch.cat([live, getattr(frozen, attribute)], 0)
+
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points = torch.zeros_like(cat("get_xyz"), dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
     except:
@@ -51,9 +60,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
+    means3D = cat("get_xyz")
     means2D = screenspace_points
-    opacity = pc.get_opacity
+    opacity = cat("get_opacity")
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -63,9 +72,11 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
+        if frozen is not None:
+            cov3D_precomp = torch.cat([cov3D_precomp, frozen.get_covariance(scaling_modifier)], 0)
     else:
-        scales = pc.get_scaling
-        rotations = pc.get_rotation
+        scales = cat("get_scaling")
+        rotations = cat("get_rotation")
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -73,16 +84,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     colors_precomp = None
     if override_color is None:
         if pipe.convert_SHs_python:
-            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
-            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
+            shs_view = cat("get_features").transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+            dir_pp = (means3D - viewpoint_camera.camera_center.repeat(means3D.shape[0], 1))
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
             if separate_sh:
-                dc, shs = pc.get_features_dc, pc.get_features_rest
+                dc, shs = cat("get_features_dc"), cat("get_features_rest")
             else:
-                shs = pc.get_features
+                shs = cat("get_features")
     else:
         colors_precomp = override_color
 
@@ -118,6 +129,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # They will be excluded from value updates used in the splitting criteria.
     if clamp_output:  # off for the moment renders (utils/observation_model.py): u^k over a black background is not a colour
         rendered_image = rendered_image.clamp(0, 1)
+    radii = radii[:n_live]  # densification statistics and the sparse optimizer see the optimised Gaussians only
     out = {
         "render": rendered_image,
         "viewspace_points": screenspace_points,
