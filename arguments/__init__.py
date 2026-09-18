@@ -58,6 +58,8 @@ class ModelParams(ParamGroup):
         # interval shape prior on the optimised Gaussians (utils/shape_prior.py): JSON of regions, each
         # constraining the selected Gaussians' mass along a normal to an allowed interval
         self.shape_prior = ""  # no leading underscore: the auto short flag -s would clash with --source_path
+        self.shape_prior_mode = "full"  # "centre": ablation without the covariance term
+        self.shape_prior_detach_opacity = False  # True: the prior cannot resolve a violation by fading the Gaussian
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False

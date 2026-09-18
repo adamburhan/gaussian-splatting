@@ -18,7 +18,7 @@ import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
 from utils.observation_model import depth_residual, distributional_residual, render_moments, DISTRIBUTIONAL
-from utils.shape_prior import load_shape_prior, shape_prior_loss
+from utils.shape_prior import load_shape_prior, shape_prior_loss, shape_prior_stats
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -147,7 +147,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Interval shape prior: acts on positions and covariances of the optimised Gaussians (not the frozen set)
         if shape_prior is not None and opt.shape_prior_weight > 0:
-            loss += opt.shape_prior_weight * shape_prior_loss(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior)
+            loss += opt.shape_prior_weight * shape_prior_loss(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior,
+                                                              dataset.shape_prior_mode, dataset.shape_prior_detach_opacity)
 
         loss.backward()
 
@@ -169,6 +170,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+            if shape_prior is not None and (iteration in testing_iterations or iteration % 1000 == 0):
+                # what the prior is doing to the selected Gaussians: positioning, thickness or fading
+                stats = shape_prior_stats(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior)
+                print(f"\n[ITER {iteration}] shape prior " + "; ".join(
+                    f"{name}: n={s['count']}" + (f" excursion {s['excursion_m']*1000:.1f} mm, normal std {s['normal_std_m']*1000:.2f} mm, opacity {s['opacity']:.3f}" if s['count'] else "")
+                    for name, s in stats.items()))
+                if tb_writer:
+                    for name, s in stats.items():
+                        for key, value in s.items():
+                            tb_writer.add_scalar(f"shape_prior/{name}/{key}", value, iteration)
 
             # Densification
             if iteration < opt.densify_until_iter:
