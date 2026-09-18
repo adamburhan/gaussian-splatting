@@ -57,7 +57,7 @@ class ModelParams(ParamGroup):
         self._frozen_ply = ""
         # interval shape prior on the optimised Gaussians (utils/shape_prior.py): JSON of regions, each
         # constraining the selected Gaussians' mass along a normal to an allowed interval
-        self._shape_prior = ""
+        self.shape_prior = ""  # no leading underscore: the auto short flag -s would clash with --source_path
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False
