@@ -55,6 +55,9 @@ class ModelParams(ParamGroup):
         # Gaussians (Graphdeco PLY) rendered together with the optimised ones but never optimised,
         # densified, pruned or opacity-reset: an oracle / prior shape whose appearance stays at its init
         self._frozen_ply = ""
+        # interval shape prior on the optimised Gaussians (utils/shape_prior.py): JSON of regions, each
+        # constraining the selected Gaussians' mass along a normal to an allowed interval
+        self._shape_prior = ""
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False
@@ -105,6 +108,7 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
+        self.shape_prior_weight = 0.01  # loss is in units of (violation / interval half-width)^2 per Gaussian
         self.random_background = False
         self.optimizer_type = "default"
         super().__init__(parser, "Optimization Parameters")

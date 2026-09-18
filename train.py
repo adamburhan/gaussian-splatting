@@ -18,6 +18,7 @@ import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
 from utils.observation_model import depth_residual, distributional_residual, render_moments, DISTRIBUTIONAL
+from utils.shape_prior import load_shape_prior, shape_prior_loss
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -52,6 +53,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     scene = Scene(dataset, gaussians)
     if dataset.frozen_ply:
         gaussians.load_frozen(dataset.frozen_ply)
+    shape_prior = load_shape_prior(dataset.shape_prior) if dataset.shape_prior else None
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -142,6 +144,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
+
+        # Interval shape prior: acts on positions and covariances of the optimised Gaussians (not the frozen set)
+        if shape_prior is not None and opt.shape_prior_weight > 0:
+            loss += opt.shape_prior_weight * shape_prior_loss(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior)
 
         loss.backward()
 
