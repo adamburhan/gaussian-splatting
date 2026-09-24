@@ -51,8 +51,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
-    if dataset.frozen_ply:
-        gaussians.load_frozen(dataset.frozen_ply)
     shape_prior = load_shape_prior(dataset.shape_prior) if dataset.shape_prior else None
     gaussians.training_setup(opt)
     if checkpoint:
@@ -145,7 +143,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
-        # Interval shape prior: acts on positions and covariances of the optimised Gaussians (not the frozen set)
+        # Interval shape prior: acts on positions and covariances of the Gaussians
         if shape_prior is not None and opt.shape_prior_weight > 0:
             loss += opt.shape_prior_weight * shape_prior_loss(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior,
                                                               dataset.shape_prior_mode, dataset.shape_prior_detach_opacity)

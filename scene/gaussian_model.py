@@ -63,21 +63,7 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
-        self.frozen = None  # GaussianModel rendered after this one and left untouched by training (--frozen_ply)
         self.setup_functions()
-
-    def load_frozen(self, path):
-        self.frozen = GaussianModel(self.max_sh_degree)
-        self.frozen.load_ply(path)
-        for tensor in (self.frozen._xyz, self.frozen._features_dc, self.frozen._features_rest,
-                       self.frozen._opacity, self.frozen._scaling, self.frozen._rotation):
-            tensor.requires_grad_(False)
-        print("Number of frozen Gaussians: ", self.frozen.get_xyz.shape[0])
-
-    @property
-    def get_xyz_all(self):
-        """Centres in rasterization order: optimised Gaussians, then the frozen set."""
-        return self._xyz if self.frozen is None else torch.cat([self._xyz, self.frozen._xyz], 0)
 
     def capture(self):
         return (
@@ -253,15 +239,13 @@ class GaussianModel:
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
-        # the frozen set is written into the same file so render.py reproduces the training-time scene
-        models = [self] if self.frozen is None else [self, self.frozen]
-        xyz = np.concatenate([m._xyz.detach().cpu().numpy() for m in models])
+        xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
-        f_dc = np.concatenate([m._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy() for m in models])
-        f_rest = np.concatenate([m._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy() for m in models])
-        opacities = np.concatenate([m._opacity.detach().cpu().numpy() for m in models])
-        scale = np.concatenate([m._scaling.detach().cpu().numpy() for m in models])
-        rotation = np.concatenate([m._rotation.detach().cpu().numpy() for m in models])
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 

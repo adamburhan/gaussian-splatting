@@ -52,9 +52,6 @@ class ModelParams(ParamGroup):
         self._images = "images"
         self._depths = ""
         self.depth_unit = "encoded"  # "mm": metric uint16 depth PNGs (COLMAP reader; no depth_params.json)
-        # Gaussians (Graphdeco PLY) rendered together with the optimised ones but never optimised,
-        # densified, pruned or opacity-reset: an oracle / prior shape whose appearance stays at its init
-        self._frozen_ply = ""
         # interval shape prior on the optimised Gaussians (utils/shape_prior.py): JSON of regions, each
         # constraining the selected Gaussians' mass along a normal to an allowed interval
         self.shape_prior = ""  # no leading underscore: the auto short flag -s would clash with --source_path
