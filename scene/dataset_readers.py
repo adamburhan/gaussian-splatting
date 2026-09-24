@@ -328,9 +328,7 @@ def readScannetppInfo(path, depths):
     """ScanNet++ iPhone NVS benchmark: train on the registered iPhone frames, test on the held-out
     DSLR views that the official toolbox undistorted with the iPhone intrinsics. Both COLMAP models
     are expressed in the scan's world frame, so their poses can be mixed directly.
-    The iPhone camera is treated as the pinhole K, as the toolbox does: the OPENCV coefficients in
-    cameras.txt do not describe the extracted frames (long edges are straight to <0.6 px where the model
-    predicts ~2 px of bow, and undistorting worsens depth-based reprojection at the periphery)."""
+    The iPhone camera is treated as the pinhole K, as the toolbox does."""
     iphone = os.path.join(path, "iphone")
     camera = list(read_intrinsics_text(os.path.join(iphone, "colmap/cameras.txt")).values())[0]
     fx, fy, cx, cy = camera.params[:4]
