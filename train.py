@@ -18,7 +18,7 @@ import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
 from utils.observation_model import depth_residual, distributional_residual, render_moments, DISTRIBUTIONAL
-from utils.shape_prior import load_shape_prior, shape_prior_loss, shape_prior_stats
+from utils.shape_prior import ShapePrior
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -51,7 +51,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
-    shape_prior = load_shape_prior(dataset.shape_prior) if dataset.shape_prior else None
+    shape_prior = ShapePrior(dataset.shape_prior, dataset.shape_prior_radius, dataset.shape_prior_delta,
+                             dataset.shape_prior_refresh, dataset.shape_prior_mode) if dataset.shape_prior else None
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -143,10 +144,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
-        # Interval shape prior: acts on positions and covariances of the Gaussians
+        # Ray-interval shape prior on the positions and extents of the Gaussians owned by a constrained object
+        shape_loss, n_constrained = 0.0, 0
         if shape_prior is not None and opt.shape_prior_weight > 0:
-            loss += opt.shape_prior_weight * shape_prior_loss(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior,
-                                                              dataset.shape_prior_mode, dataset.shape_prior_detach_opacity)
+            shape_prior.maybe_refresh(gaussians.get_xyz, iteration)
+            shape_term, n_constrained = shape_prior.loss(viewpoint_cam, gaussians.get_xyz, gaussians.get_covariance())
+            loss += opt.shape_prior_weight * shape_term
+            shape_loss = shape_term.item()
 
         loss.backward()
 
@@ -169,15 +173,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
             if shape_prior is not None and (iteration in testing_iterations or iteration % 1000 == 0):
-                # what the prior is doing to the selected Gaussians: positioning, thickness or fading
-                stats = shape_prior_stats(gaussians.get_xyz, gaussians.get_covariance(), gaussians.get_opacity, shape_prior)
-                print(f"\n[ITER {iteration}] shape prior " + "; ".join(
-                    f"{name}: n={s['count']}" + (f" excursion {s['excursion_m']*1000:.1f} mm, normal std {s['normal_std_m']*1000:.2f} mm, opacity {s['opacity']:.3f}" if s['count'] else "")
-                    for name, s in stats.items()))
+                # is the constraint actually applied: the added loss, assigned Gaussians per object, constrained now
+                assigned = shape_prior.stats()
+                print(f"\n[ITER {iteration}] shape prior loss {shape_loss:.6f}, constrained in this view {n_constrained}, assigned "
+                      + ", ".join(f"{k} {v}" for k, v in assigned.items()))
                 if tb_writer:
-                    for name, s in stats.items():
-                        for key, value in s.items():
-                            tb_writer.add_scalar(f"shape_prior/{name}/{key}", value, iteration)
+                    tb_writer.add_scalar("shape_prior/loss", shape_loss, iteration)
+                    tb_writer.add_scalar("shape_prior/constrained", n_constrained, iteration)
+                    for k, v in assigned.items():
+                        tb_writer.add_scalar(f"shape_prior/assigned/{k}", v, iteration)
 
             # Densification
             if iteration < opt.densify_until_iter:

@@ -52,11 +52,14 @@ class ModelParams(ParamGroup):
         self._images = "images"
         self._depths = ""
         self.depth_unit = "encoded"  # "mm": metric uint16 depth PNGs (COLMAP reader; no depth_params.json)
-        # interval shape prior on the optimised Gaussians (utils/shape_prior.py): JSON of regions, each
-        # constraining the selected Gaussians' mass along a normal to an allowed interval
+        # ray-interval shape prior (utils/shape_prior.py): directory baked by shape_prior_maps.py from fixed
+        # object meshes; Gaussians within shape_prior_radius of an object's surface are constrained to that
+        # object's ray interval, widened by shape_prior_delta, in the current training view
         self.shape_prior = ""  # no leading underscore: the auto short flag -s would clash with --source_path
-        self.shape_prior_mode = "full"  # "centre": ablation without the covariance term
-        self.shape_prior_detach_opacity = False  # True: the prior cannot resolve a violation by fading the Gaussian
+        self.shape_prior_mode = "full"  # "centre": ablation without the extent term
+        self.shape_prior_radius = 0.15  # m
+        self.shape_prior_delta = 0.05  # m
+        self.shape_prior_refresh = 100  # iterations between ownership updates (also refreshed when the count changes)
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False
@@ -107,7 +110,7 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
-        self.shape_prior_weight = 0.01  # loss is in units of (violation / interval half-width)^2 per Gaussian
+        self.shape_prior_weight = 1.0  # loss in squared metres per Gaussian (mean per object, mean over objects)
         self.random_background = False
         self.optimizer_type = "default"
         super().__init__(parser, "Optimization Parameters")
