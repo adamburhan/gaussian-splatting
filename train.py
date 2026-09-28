@@ -52,7 +52,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     shape_prior = ShapePrior(dataset.shape_prior, dataset.shape_prior_radius, dataset.shape_prior_delta,
-                             dataset.shape_prior_refresh, dataset.shape_prior_mode) if dataset.shape_prior else None
+                             dataset.shape_prior_refresh, dataset.shape_prior_mode, dataset.shape_prior_samples) if dataset.shape_prior else None
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -148,7 +148,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         shape_loss, n_constrained = 0.0, 0
         if shape_prior is not None and opt.shape_prior_weight > 0:
             shape_prior.maybe_refresh(gaussians.get_xyz, iteration)
-            shape_term, n_constrained = shape_prior.loss(viewpoint_cam, gaussians.get_xyz, gaussians.get_covariance())
+            shape_term, n_constrained = shape_prior.loss(viewpoint_cam, gaussians.get_xyz, gaussians.get_covariance(),
+                                                         gaussians.get_scaling, gaussians.get_rotation)
             loss += opt.shape_prior_weight * shape_term
             shape_loss = shape_term.item()
 

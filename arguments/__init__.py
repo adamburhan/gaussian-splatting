@@ -56,7 +56,8 @@ class ModelParams(ParamGroup):
         # object meshes; Gaussians within shape_prior_radius of an object's surface are constrained to that
         # object's ray interval, widened by shape_prior_delta, in the current training view
         self.shape_prior = ""  # no leading underscore: the auto short flag -s would clash with --source_path
-        self.shape_prior_mode = "full"  # "centre": ablation without the extent term
+        self.shape_prior_mode = "full"  # ray intervals: "full" / "centre" (no extent term); "containment": expected containment in the solid
+        self.shape_prior_samples = 16  # containment: reparameterised draws per Gaussian (0: centre only)
         self.shape_prior_radius = 0.15  # m
         self.shape_prior_delta = 0.05  # m
         self.shape_prior_refresh = 100  # iterations between ownership updates (also refreshed when the count changes)

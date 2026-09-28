@@ -1,4 +1,5 @@
-"""Ray-interval shape prior on the Gaussians' positions and extents (--shape_prior <dir>).
+"""Shape prior on the Gaussians' positions and extents (--shape_prior <dir>): ray intervals (modes "full",
+"centre") or expected containment in the object's solid volume (mode "containment").
 
 The directory is baked offline (tools/synthetic_capture/shape_prior_maps.py) from fixed world-frame
 object meshes: objects.json, one unsigned distance grid per object, and per training frame the
@@ -20,9 +21,17 @@ over the objects with a constrained Gaussian in this camera. Units: squared metr
 by interval width, no opacity weighting. Gradients reach positions, scales and rotations (through the
 covariance); ownership, pixels, rays and endpoints are detached.
 
+Containment (mode "containment"). The bake also stores each object's solid volume V_o (generalized
+winding number > 0.5). With d(x, V_o) = 0 inside and the distance to the surface outside, every
+owned Gaussian pays, in every iteration regardless of the camera or occlusion,
+L_i = E_{X ~ N(mu_i, Sigma_i)}[(d(X, V_o) - delta)_+^2], estimated with `samples` reparameterised draws
+X = mu_i + R_i diag(s_i) eps (samples = 0: the centre only). Same aggregation and units as above;
+gradients reach positions, scales and rotations through the samples and the trilinear grid.
+
 Accepted limitations: proximity can capture neighbouring floor Gaussians; assignments change as
 centres move; rays that miss the mesh, or hit it once, carry no constraint; the outer hit envelope
-permits gaps between the parts of an object.
+permits gaps between the parts of an object; the solid of an open mesh is what its winding number
+says (a cavity between closed parts counts as outside).
 """
 
 import json
@@ -61,17 +70,29 @@ def directional_variance(covariance, d):
             + 2 * (c[:, 1] * d[:, 0] * d[:, 1] + c[:, 2] * d[:, 0] * d[:, 2] + c[:, 4] * d[:, 1] * d[:, 2]))
 
 
+def quaternion_to_matrix(q):
+    """[N, 4] (w, x, y, z), normalised inside -> [N, 3, 3], as the fork's build_rotation."""
+    q = q / q.norm(dim=1, keepdim=True)
+    w, x, y, z = q.unbind(1)
+    return torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+                        2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+                        2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], 1).reshape(-1, 3, 3)
+
+
 class ShapePrior:
-    def __init__(self, path, radius=0.15, delta=0.05, refresh=100, mode="full", device="cuda"):
+    def __init__(self, path, radius=0.15, delta=0.05, refresh=100, mode="full", samples=16, device="cuda"):
         meta = json.load(open(os.path.join(path, "objects.json")))
         self.labels = [o["label"] for o in meta["objects"]]
         self.width, self.height = meta["width"], meta["height"]
-        self.radius, self.delta, self.refresh, self.mode, self.device = radius, delta, refresh, mode, device
-        self.grids = []
+        self.radius, self.delta, self.refresh, self.mode, self.samples, self.device = radius, delta, refresh, mode, samples, device
+        self.grids, self.inside = [], []
         for o in meta["objects"]:
             g = np.load(os.path.join(path, o["distance"]))
             self.grids.append((torch.tensor(g["origin"], device=device), float(g["spacing"]), float(meta["dilate"]),
                                torch.tensor(g["values"].astype(np.float32), device=device)[None, None]))  # [1, 1, X, Y, Z]
+            self.inside.append(torch.tensor(g["inside"].astype(np.float32), device=device)[None, None] if "inside" in g else None)
+        if mode == "containment" and any(m is None for m in self.inside):
+            raise ValueError("containment needs the solid volume: re-bake the prior with inside masks")
         # per frame: keys = object * H * W + pixel, sorted, for a binary-search lookup without dense maps
         self.frames = {}
         for name in meta["frames"]:
@@ -84,18 +105,30 @@ class ShapePrior:
 
     # --- ownership ---------------------------------------------------------------
 
+    def sample_grid(self, k, xyz, field):
+        """Trilinear sample of object k's `field` grid at xyz [N, 3]; differentiable in xyz."""
+        origin, spacing, clamp, values = self.grids[k]
+        shape = torch.tensor(values.shape[2:], device=xyz.device, dtype=xyz.dtype)
+        u = (xyz - origin) / spacing / (shape - 1) * 2 - 1  # [-1, 1] across the grid, index order (x, y, z)
+        # grid_sample indexes its last dimension with the first coordinate, so feed (z, y, x)
+        v = F.grid_sample(field, u.flip(-1)[None, None, None], mode="bilinear", padding_mode="border", align_corners=True)[0, 0, 0, 0]
+        return v, (u.abs() > 1).any(-1)
+
     @torch.no_grad()
     def distances(self, xyz):
         """[N, K] unsigned distance to each object's surface, clamped at the grid margin outside the grid."""
         out = []
-        for origin, spacing, clamp, values in self.grids:
-            shape = torch.tensor(values.shape[2:], device=xyz.device, dtype=xyz.dtype)
-            u = (xyz - origin) / spacing / (shape - 1) * 2 - 1  # [-1, 1] across the grid, index order (x, y, z)
-            # grid_sample indexes its last dimension with the first coordinate, so feed (z, y, x)
-            d = F.grid_sample(values, u.flip(-1)[None, None, None], mode="bilinear", padding_mode="border", align_corners=True)[0, 0, 0, 0]
-            outside = (u.abs() > 1).any(-1)
+        for k, (origin, spacing, clamp, values) in enumerate(self.grids):
+            d, outside = self.sample_grid(k, xyz, values)
             out.append(torch.where(outside, torch.full_like(d, clamp), d))
         return torch.stack(out, 1)
+
+    def containment_distance(self, k, xyz):
+        """d(x, V_k): zero inside object k's solid, the distance to its surface outside; differentiable in xyz."""
+        d, outside = self.sample_grid(k, xyz, self.grids[k][3])
+        inside, _ = self.sample_grid(k, xyz, self.inside[k])
+        d = torch.where(outside, torch.full_like(d, self.grids[k][2]), d)
+        return torch.where(inside > 0.5, torch.zeros_like(d), d)
 
     @torch.no_grad()
     def assign(self, xyz):
@@ -137,8 +170,11 @@ class ShapePrior:
             b = torch.where(found, b_tab[idx] + self.delta, torch.zeros(n, device=xyz.device))
         return found, a, b
 
-    def loss(self, cam, xyz, covariance):
-        """Scalar; zero (with a graph) when nothing is constrained. Also returns the number constrained."""
+    def loss(self, cam, xyz, covariance=None, scaling=None, rotation=None):
+        """Scalar; zero (with a graph) when nothing is constrained. Also returns the number constrained.
+        Ray modes use `covariance` (packed); containment uses `scaling` [N, 3] and `rotation` [N, 4]."""
+        if self.mode == "containment":
+            return self.containment_loss(xyz, scaling, rotation)
         valid, a, b = self.lookup(cam, xyz)
         if not valid.any():
             return xyz.sum() * 0.0, 0
@@ -153,6 +189,29 @@ class ShapePrior:
         count = torch.bincount(owner, minlength=len(self.labels)).to(penalty.dtype)
         present = count > 0
         return (per_object[present] / count[present]).mean(), int(valid.sum())
+
+    def containment_loss(self, xyz, scaling, rotation):
+        owned = self.owner >= 0
+        if not owned.any():
+            return xyz.sum() * 0.0, 0
+        n_samples = max(self.samples, 1)
+        total, present = xyz.new_zeros(()), 0
+        R = quaternion_to_matrix(rotation) if self.samples > 0 else None
+        for k in range(len(self.labels)):
+            mine = self.owner == k
+            if not mine.any():
+                continue
+            mu = xyz[mine]
+            if self.samples > 0:
+                eps = torch.randn(mu.shape[0], n_samples, 3, device=xyz.device)
+                offsets = torch.einsum("nkj,nij->nki", eps * scaling[mine][:, None, :], R[mine])  # R diag(s) eps
+                pts = (mu[:, None, :] + offsets).reshape(-1, 3)
+            else:
+                pts = mu
+            penalty = torch.relu(self.containment_distance(k, pts) - self.delta).square().reshape(mu.shape[0], -1).mean(1)
+            total = total + penalty.mean()
+            present += 1
+        return total / present, int(owned.sum())
 
     @torch.no_grad()
     def stats(self):
