@@ -1,5 +1,6 @@
-"""Shape prior on the Gaussians' positions and extents (--shape_prior <dir>): ray intervals (modes "full",
-"centre") or expected containment in the object's solid volume (mode "containment").
+"""Shape prior on the Gaussians' positions and extents (--shape_prior <dir>). Modes: "containment" (expected
+containment in the object's solid volume), "containment_centre" (the centre only), "intervals" (ray
+intervals in the current camera), "intervals_centre" (ray intervals, centre only).
 
 The directory is baked offline (tools/synthetic_capture/shape_prior_maps.py) from fixed world-frame
 object meshes: objects.json, one unsigned distance grid per object, and per training frame the
@@ -16,7 +17,7 @@ pixel carries an interval [a, b] for the Gaussian's own object (other objects on
 occlusion is not), the Gaussian's spread along its centre ray d = (mu - c) / |mu - c|,
 T ~ N(m, s^2) with m = |mu - c| and s^2 = d^T Sigma d, is penalised outside [a - delta, b + delta]:
 L = E[(A - T)_+^2 + (T - B)_+^2] = H(A - m, s) + H(m - B, s), H(z, s) = (z^2 + s^2) Phi(z/s) + z s phi(z/s).
-Mode "centre" drops the spread: (A - m)_+^2 + (m - B)_+^2. Penalties are averaged per object, then
+Mode "intervals_centre" drops the spread: (A - m)_+^2 + (m - B)_+^2. Penalties are averaged per object, then
 over the objects with a constrained Gaussian in this camera. Units: squared metres, no normalisation
 by interval width, no opacity weighting. Gradients reach positions, scales and rotations (through the
 covariance); ownership, pixels, rays and endpoints are detached.
@@ -25,7 +26,7 @@ Containment (mode "containment"). The bake also stores each object's solid volum
 winding number > 0.5). With d(x, V_o) = 0 inside and the distance to the surface outside, every
 owned Gaussian pays, in every iteration regardless of the camera or occlusion,
 L_i = E_{X ~ N(mu_i, Sigma_i)}[(d(X, V_o) - delta)_+^2], estimated with `samples` reparameterised draws
-X = mu_i + R_i diag(s_i) eps (samples = 0: the centre only). Same aggregation and units as above;
+X = mu_i + R_i diag(s_i) eps ("containment_centre": the centre only). Same aggregation and units as above;
 gradients reach positions, scales and rotations through the samples and the trilinear grid.
 
 Accepted limitations: proximity can capture neighbouring floor Gaussians; assignments change as
@@ -79,8 +80,15 @@ def quaternion_to_matrix(q):
                         2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], 1).reshape(-1, 3, 3)
 
 
+MODES = ("containment", "containment_centre", "intervals", "intervals_centre")
+
+
 class ShapePrior:
-    def __init__(self, path, radius=0.15, delta=0.05, refresh=100, mode="full", samples=16, device="cuda"):
+    def __init__(self, path, radius=0.15, delta=0.05, refresh=100, mode="containment", samples=16, device="cuda"):
+        if mode not in MODES:
+            raise ValueError(f"shape prior mode {mode!r}; choose one of {MODES}")
+        if mode == "containment_centre":
+            samples = 0
         meta = json.load(open(os.path.join(path, "objects.json")))
         self.labels = [o["label"] for o in meta["objects"]]
         self.width, self.height = meta["width"], meta["height"]
@@ -91,7 +99,7 @@ class ShapePrior:
             self.grids.append((torch.tensor(g["origin"], device=device), float(g["spacing"]), float(meta["dilate"]),
                                torch.tensor(g["values"].astype(np.float32), device=device)[None, None]))  # [1, 1, X, Y, Z]
             self.inside.append(torch.tensor(g["inside"].astype(np.float32), device=device)[None, None] if "inside" in g else None)
-        if mode == "containment" and any(m is None for m in self.inside):
+        if mode.startswith("containment") and any(m is None for m in self.inside):
             raise ValueError("containment needs the solid volume: re-bake the prior with inside masks")
         # per frame: keys = object * H * W + pixel, sorted, for a binary-search lookup without dense maps
         self.frames = {}
@@ -173,7 +181,7 @@ class ShapePrior:
     def loss(self, cam, xyz, covariance=None, scaling=None, rotation=None):
         """Scalar; zero (with a graph) when nothing is constrained. Also returns the number constrained.
         Ray modes use `covariance` (packed); containment uses `scaling` [N, 3] and `rotation` [N, 4]."""
-        if self.mode == "containment":
+        if self.mode.startswith("containment"):
             return self.containment_loss(xyz, scaling, rotation)
         valid, a, b = self.lookup(cam, xyz)
         if not valid.any():
@@ -183,7 +191,7 @@ class ShapePrior:
         m = delta.norm(dim=1)
         d = (delta / m[:, None]).detach()
         var = directional_variance(covariance[valid], d)
-        penalty = interval_penalty(m, var, a, b, self.mode)
+        penalty = interval_penalty(m, var, a, b, "centre" if self.mode == "intervals_centre" else "full")
         # mean within each object, then mean over the objects present, so big objects do not dominate
         per_object = torch.zeros(len(self.labels), device=xyz.device).index_add(0, owner, penalty)
         count = torch.bincount(owner, minlength=len(self.labels)).to(penalty.dtype)
