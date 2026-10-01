@@ -19,6 +19,7 @@ from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
 from utils.observation_model import depth_residual, distributional_residual, render_moments, DISTRIBUTIONAL
 from utils.shape_prior import ShapePrior
+import csv
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -54,6 +55,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     shape_prior = ShapePrior(dataset.shape_prior, dataset.shape_prior_radius, dataset.shape_prior_delta,
                              dataset.shape_prior_refresh, dataset.shape_prior_mode, dataset.shape_prior_samples) if dataset.shape_prior else None
     gaussians.training_setup(opt)
+    loss_file = open(os.path.join(dataset.model_path, "losses.csv"), "w", newline="")
+    loss_log = csv.writer(loss_file)
+    loss_log.writerow(["iteration", "l1", "dssim", "depth_raw", "depth_weight", "shape_raw", "shape_weight", "total",
+                       "grad_rgb", "grad_depth", "grad_shape"])  # grad_*: L2 norm of the (weighted) term's gradient on the positions
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -127,10 +132,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        # the three terms are kept apart so that losses.csv can record each one and its gradient on the positions
+        rgb_term = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        loss = rgb_term
 
         # Depth regularization
-        Ll1depth_pure = 0.0
+        Ll1depth_pure, depth_term = 0.0, None
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
             if dataset.observation_model in DISTRIBUTIONAL:
                 moments = render_moments(viewpoint_cam, gaussians, pipe, SPARSE_ADAM_AVAILABLE, dataset.observation_model)
@@ -138,20 +145,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 invDepth = render_pkg["depth"]
                 Ll1depth_pure = depth_residual(invDepth, viewpoint_cam, dataset.observation_model).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
-            Ll1depth = Ll1depth.item()
+            depth_term = depth_l1_weight(iteration) * Ll1depth_pure
+            loss = loss + depth_term
+            Ll1depth = depth_term.item()
         else:
             Ll1depth = 0
 
-        # Ray-interval shape prior on the positions and extents of the Gaussians owned by a constrained object
-        shape_loss, n_constrained = 0.0, 0
+        # Shape prior on the positions and extents of the Gaussians owned by a constrained object
+        shape_loss, n_constrained, shape_term = 0.0, 0, None
         if shape_prior is not None and opt.shape_prior_weight > 0:
             shape_prior.maybe_refresh(gaussians.get_xyz, iteration)
-            shape_term, n_constrained = shape_prior.loss(viewpoint_cam, gaussians.get_xyz, gaussians.get_covariance(),
-                                                         gaussians.get_scaling, gaussians.get_rotation)
-            loss += opt.shape_prior_weight * shape_term
-            shape_loss = shape_term.item()
+            shape_raw, n_constrained = shape_prior.loss(viewpoint_cam, gaussians.get_xyz, gaussians.get_covariance(),
+                                                        gaussians.get_scaling, gaussians.get_rotation)
+            shape_term = opt.shape_prior_weight * shape_raw
+            loss = loss + shape_term
+            shape_loss = shape_raw.item()
+
+        # per-term record: values every iteration, gradient norms on the positions every 100 (an extra partial
+        # backward per term; the graph is kept for the real backward below)
+        grads = {}
+        if iteration % 100 == 0:
+            for name, term in (("rgb", rgb_term), ("depth", depth_term), ("shape", shape_term)):
+                if term is not None and term.requires_grad:
+                    g = torch.autograd.grad(term, gaussians._xyz, retain_graph=True, allow_unused=True)[0]
+                    grads[name] = 0.0 if g is None else g.norm().item()
+        loss_log.writerow([iteration, Ll1.item(), 1.0 - ssim_value.item(),
+                           float(Ll1depth_pure) if depth_term is not None else "", depth_l1_weight(iteration) if depth_term is not None else "",
+                           shape_loss if shape_term is not None else "", opt.shape_prior_weight if shape_term is not None else "",
+                           loss.item(), grads.get("rgb", ""), grads.get("depth", ""), grads.get("shape", "")])
+        if iteration % 100 == 0:
+            loss_file.flush()
 
         loss.backward()
 
