@@ -178,6 +178,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss.backward()
 
+        if dataset.shape_prior_seed_frozen and gaussians.seeded.any():
+            # the prior's Gaussians keep their supplied geometry and colour: no gradient reaches them (an unseen
+            # seed only ever gets gradient through haze in front of it, which would paint it with noise)
+            for param in (gaussians._xyz, gaussians._features_dc, gaussians._features_rest, gaussians._opacity, gaussians._scaling, gaussians._rotation):
+                if param.grad is not None:
+                    param.grad[gaussians.seeded] = 0
+
         iter_end.record()
 
         with torch.no_grad():

@@ -253,6 +253,8 @@ class GaussianModel:
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
+        if self.seeded.numel():
+            np.save(os.path.join(os.path.dirname(path), "seeded.npy"), self.seeded.cpu().numpy())  # which rows the prior supplied
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)

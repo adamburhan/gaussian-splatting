@@ -65,6 +65,7 @@ class ModelParams(ParamGroup):
         # `seeded` in GaussianModel and exempt from opacity resets; everything else in 3DGS is unchanged
         self.shape_prior_seeds = ""  # seeds.ply (no leading underscore: no auto short flag)
         self.shape_prior_seed_opacity = 0.9
+        self.shape_prior_seed_frozen = False  # True: seeded Gaussians receive no gradient at all (geometry and colour from the prior only)
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False
