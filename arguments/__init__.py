@@ -61,6 +61,10 @@ class ModelParams(ParamGroup):
         self.shape_prior_radius = 0.15  # m
         self.shape_prior_delta = 0.05  # m
         self.shape_prior_refresh = 100  # iterations between ownership updates (also refreshed when the count changes)
+        # Gaussians the prior supplies at init (shape_prior_maps.py --seeds): unseen object-surface points, flagged
+        # `seeded` in GaussianModel and exempt from opacity resets; everything else in 3DGS is unchanged
+        self.shape_prior_seeds = ""  # seeds.ply (no leading underscore: no auto short flag)
+        self.shape_prior_seed_opacity = 0.9
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False
