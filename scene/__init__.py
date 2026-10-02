@@ -26,7 +26,8 @@ def read_seeds(path):
     v = PlyData.read(path)["vertex"]
     xyz = np.stack([v["x"], v["y"], v["z"]], 1)
     rgb = np.stack([v["red"], v["green"], v["blue"]], 1) / 255.0
-    return BasicPointCloud(points=xyz, colors=rgb, normals=np.zeros_like(xyz))
+    normals = np.stack([v["nx"], v["ny"], v["nz"]], 1)
+    return BasicPointCloud(points=xyz, colors=rgb, normals=normals)
 
 
 class Scene:
@@ -97,7 +98,7 @@ class Scene:
         else:
             seeds = read_seeds(args.shape_prior_seeds) if args.shape_prior_seeds else None
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent,
-                                           seeds=seeds, seed_opacity=args.shape_prior_seed_opacity)
+                                           seeds=seeds, seed_opacity=args.shape_prior_seed_opacity, seed_thickness=args.shape_prior_seed_thickness)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

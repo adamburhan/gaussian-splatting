@@ -131,3 +131,14 @@ def safe_state(silent, seed=0):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+
+def rotation_from_normals(n):
+    """Unit quaternions (w, x, y, z) of the shortest-arc rotation taking the z axis onto each normal `n` [N, 3], so
+    that build_rotation(q)[:, :, 2] == n: a Gaussian with a small third scale is then a disc on the surface.
+    q = normalise(1 + n_z, -n_y, n_x, 0); the antipodal case n = -z uses a half turn about x."""
+    n = n / n.norm(dim=1, keepdim=True)
+    q = torch.stack([1 + n[:, 2], -n[:, 1], n[:, 0], torch.zeros_like(n[:, 0])], 1)
+    flipped = 1 + n[:, 2] < 1e-6
+    q[flipped] = torch.tensor([0.0, 1.0, 0.0, 0.0], device=n.device)
+    return q / q.norm(dim=1, keepdim=True)

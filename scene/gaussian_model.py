@@ -9,9 +9,10 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import math
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.general_utils import rotation_from_normals, inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
 import json
@@ -147,9 +148,12 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float, seeds : BasicPointCloud = None, seed_opacity : float = 0.9):
+    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float, seeds : BasicPointCloud = None, seed_opacity : float = 0.9, seed_thickness : float = 0.002):
         """seeds: extra points the shape prior supplies (unseen object surfaces), appended after the capture's
-        init points with their own initial opacity; they are flagged `seeded` and never opacity-reset."""
+        init points with their own initial opacity; they are flagged `seeded` and never opacity-reset. Seeds
+        carry surface normals and start as discs: tangential scale from the nearest-neighbour rule like every
+        other point, `seed_thickness` along the normal, rotated so the normal is the thin axis (an isotropic
+        2 cm Gaussian on the hidden side of a thin surface pokes through the observed side)."""
         self.spatial_lr_scale = spatial_lr_scale
         points, colors = np.asarray(pcd.points), np.asarray(pcd.colors)
         n_seeds = 0
@@ -170,6 +174,10 @@ class GaussianModel:
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
+        if n_seeds:
+            normals = torch.tensor(np.asarray(seeds.normals)).float().cuda()
+            rots[-n_seeds:] = rotation_from_normals(normals)
+            scales[-n_seeds:, 2] = math.log(seed_thickness)
 
         opacities = 0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
         self.seeded = torch.zeros(fused_point_cloud.shape[0], dtype=torch.bool, device="cuda")
