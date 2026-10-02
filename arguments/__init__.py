@@ -67,6 +67,7 @@ class ModelParams(ParamGroup):
         self.shape_prior_seed_opacity = 0.9
         self.shape_prior_seed_thickness = 0.002  # seeds start as discs on the surface: scale along the normal [m]
         self.shape_prior_seed_frozen = False  # True: seeded Gaussians receive no gradient at all (geometry and colour from the prior only)
+        self.shape_prior_seed_freeze_colour = False  # True: only the colour (DC + SH) of seeds is frozen; geometry and opacity self-correct; seeds never densify
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False

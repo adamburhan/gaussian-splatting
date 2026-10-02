@@ -20,6 +20,7 @@ from utils.general_utils import safe_state, get_expon_lr_func
 from utils.observation_model import depth_residual, distributional_residual, render_moments, DISTRIBUTIONAL
 from utils.shape_prior import ShapePrior
 import csv
+import json
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -178,10 +179,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss.backward()
 
-        if dataset.shape_prior_seed_frozen and gaussians.seeded.any():
-            # the prior's Gaussians keep their supplied geometry and colour: no gradient reaches them (an unseen
-            # seed only ever gets gradient through haze in front of it, which would paint it with noise)
-            for param in (gaussians._xyz, gaussians._features_dc, gaussians._features_rest, gaussians._opacity, gaussians._scaling, gaussians._rotation):
+        if (dataset.shape_prior_seed_frozen or dataset.shape_prior_seed_freeze_colour) and gaussians.seeded.any():
+            # the prior's Gaussians keep what we trust: everything (frozen) or only their colour (freeze_colour),
+            # in which case geometry and opacity may still self-correct where a seed intrudes on an observed view
+            params = ((gaussians._features_dc, gaussians._features_rest) if dataset.shape_prior_seed_freeze_colour
+                      else (gaussians._xyz, gaussians._features_dc, gaussians._features_rest, gaussians._opacity, gaussians._scaling, gaussians._rotation))
+            for param in params:
                 if param.grad is not None:
                     param.grad[gaussians.seeded] = 0
 
@@ -203,6 +206,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+            if gaussians.seed_index.numel() and iteration in (3000, 15000, 30000):
+                labels = shape_prior.labels if shape_prior is not None else [o["label"] for o in json.load(open(os.path.join(os.path.dirname(dataset.shape_prior_seeds), "objects.json")))["objects"]]
+                stats = gaussians.seed_stats(labels)
+                print(f"\n[ITER {iteration}] seeds " + "; ".join(f"{k}: {v['seeds']}/{v['baked']}" + (f" faded {v['faded']:.2f} opacity {v['opacity_median']:.2f} moved {v['displacement_median_m'] * 100:.1f} cm" if v['seeds'] else "") for k, v in stats.items()))
+                path = os.path.join(dataset.model_path, "seed_stats.json")
+                history = json.load(open(path)) if os.path.exists(path) else {}
+                history[str(iteration)] = stats
+                json.dump(history, open(path, "w"), indent=1)
             if shape_prior is not None and (iteration in testing_iterations or iteration % 1000 == 0):
                 # is the constraint actually applied: the added loss, assigned Gaussians per object, constrained now
                 assigned = shape_prior.stats()

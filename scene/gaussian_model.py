@@ -59,7 +59,10 @@ class GaussianModel:
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
-        self.seeded = torch.empty(0)  # bool per Gaussian: supplied by the shape prior (and descendants), exempt from opacity resets
+        self.seed_index = torch.empty(0, dtype=torch.long)  # per Gaussian: index into the bake's seed list (-1: not a seed); descendants inherit
+        self.seed_origin = torch.empty(0)  # [n_seeds, 3] bake positions, for the displacement statistics
+        self.seed_object = torch.empty(0, dtype=torch.long)  # [n_seeds] object index of each seed
+        self.seeds_densify = True  # False: seeds are never cloned or split (their view-space gradient is not accumulated)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
@@ -148,7 +151,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float, seeds : BasicPointCloud = None, seed_opacity : float = 0.9, seed_thickness : float = 0.002):
+    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float, seeds : BasicPointCloud = None, seed_opacity : float = 0.9, seed_thickness : float = 0.002, seed_objects=None):
         """seeds: extra points the shape prior supplies (unseen object surfaces), appended after the capture's
         init points with their own initial opacity; they are flagged `seeded` and never opacity-reset. Seeds
         carry surface normals and start as discs: tangential scale from the nearest-neighbour rule like every
@@ -180,10 +183,12 @@ class GaussianModel:
             scales[-n_seeds:, 2] = math.log(seed_thickness)
 
         opacities = 0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
-        self.seeded = torch.zeros(fused_point_cloud.shape[0], dtype=torch.bool, device="cuda")
+        self.seed_index = torch.full((fused_point_cloud.shape[0],), -1, dtype=torch.long, device="cuda")
         if n_seeds:
             opacities[-n_seeds:] = seed_opacity
-            self.seeded[-n_seeds:] = True
+            self.seed_index[-n_seeds:] = torch.arange(n_seeds, device="cuda")
+            self.seed_origin = fused_point_cloud[-n_seeds:].clone()
+            self.seed_object = torch.tensor(np.asarray(seed_objects), dtype=torch.long, device="cuda") if seed_objects is not None else torch.zeros(n_seeds, dtype=torch.long, device="cuda")
         opacities = self.inverse_opacity_activation(opacities)
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -261,8 +266,9 @@ class GaussianModel:
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
-        if self.seeded.numel():
+        if self.seed_index.numel():
             np.save(os.path.join(os.path.dirname(path), "seeded.npy"), self.seeded.cpu().numpy())  # which rows the prior supplied
+            np.save(os.path.join(os.path.dirname(path), "seed_index.npy"), self.seed_index.cpu().numpy())
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
@@ -388,7 +394,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        self.seeded = self.seeded[valid_points_mask]
+        self.seed_index = self.seed_index[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -413,7 +419,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_seeded):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_seed_index):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -430,7 +436,7 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
-        self.seeded = torch.cat((self.seeded, new_seeded))
+        self.seed_index = torch.cat((self.seed_index, new_seed_index))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
@@ -456,7 +462,7 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii, self.seeded[selected_pts_mask].repeat(N))
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii, self.seed_index[selected_pts_mask].repeat(N))
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -476,7 +482,7 @@ class GaussianModel:
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, self.seeded[selected_pts_mask])
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, self.seed_index[selected_pts_mask])
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
@@ -498,5 +504,27 @@ class GaussianModel:
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        if not self.seeds_densify and self.seed_index.numel():
+            update_filter = update_filter & ~self.seeded  # seeds accumulate no view-space gradient: never cloned or split
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    @property
+    def seeded(self):
+        return self.seed_index >= 0
+
+    @torch.no_grad()
+    def seed_stats(self, labels):
+        """Per object: surviving seeds, fraction with opacity < 0.5, median opacity, median displacement from the bake position [m]."""
+        idx = self.seed_index[self.seeded]
+        op = self.get_opacity[self.seeded, 0]
+        disp = (self.get_xyz[self.seeded] - self.seed_origin[idx]).norm(dim=1)
+        obj = self.seed_object[idx]
+        out = {}
+        for k, label in enumerate(labels):
+            m = obj == k
+            out[label] = {"seeds": int(m.sum()), "baked": int((self.seed_object == k).sum()),
+                          "faded": float((op[m] < 0.5).float().mean()) if m.any() else None,
+                          "opacity_median": float(op[m].median()) if m.any() else None,
+                          "displacement_median_m": float(disp[m].median()) if m.any() else None}
+        return out

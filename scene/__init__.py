@@ -27,7 +27,9 @@ def read_seeds(path):
     xyz = np.stack([v["x"], v["y"], v["z"]], 1)
     rgb = np.stack([v["red"], v["green"], v["blue"]], 1) / 255.0
     normals = np.stack([v["nx"], v["ny"], v["nz"]], 1)
-    return BasicPointCloud(points=xyz, colors=rgb, normals=normals)
+    cloud = BasicPointCloud(points=xyz, colors=rgb, normals=normals)
+    objects = np.asarray(v["object"]).astype(np.int64) if "object" in v.data.dtype.names else None
+    return cloud, objects
 
 
 class Scene:
@@ -96,9 +98,11 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
-            seeds = read_seeds(args.shape_prior_seeds) if args.shape_prior_seeds else None
+            seeds, seed_objects = read_seeds(args.shape_prior_seeds) if args.shape_prior_seeds else (None, None)
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent,
-                                           seeds=seeds, seed_opacity=args.shape_prior_seed_opacity, seed_thickness=args.shape_prior_seed_thickness)
+                                           seeds=seeds, seed_opacity=args.shape_prior_seed_opacity, seed_thickness=args.shape_prior_seed_thickness,
+                                           seed_objects=seed_objects)
+            self.gaussians.seeds_densify = not args.shape_prior_seed_freeze_colour
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
