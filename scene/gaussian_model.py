@@ -505,7 +505,10 @@ class GaussianModel:
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         if not self.seeds_densify and self.seed_index.numel():
-            update_filter = update_filter & ~self.seeded  # seeds accumulate no view-space gradient: never cloned or split
+            # seeds accumulate no view-space gradient: never cloned or split. update_filter is the renderer's
+            # (radii > 0).nonzero() index tensor [M, 1], so filter the indices rather than masking
+            idx = update_filter.reshape(-1)
+            update_filter = idx[~self.seeded[idx]][:, None]
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
