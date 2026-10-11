@@ -60,9 +60,10 @@ class Camera(nn.Module):
         self.invdepthmap = None
         self.depth_reliable = False
         if invdepthmap is not None:
-            self.depth_mask = torch.ones_like(self.alpha_mask)
             self.invdepthmap = cv2.resize(invdepthmap, resolution)
             self.invdepthmap[self.invdepthmap < 0] = 0
+            # ADAM CHANGE: pixels without a reading (inverse depth 0) are excluded from the depth loss; 3DGS used an all-ones mask
+            self.depth_mask = torch.from_numpy((self.invdepthmap > 0)[None].astype(np.float32)).to(self.data_device)
             self.depth_reliable = True
 
             if depth_params is not None:

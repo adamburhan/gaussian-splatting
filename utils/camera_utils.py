@@ -22,7 +22,10 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 
     if cam_info.depth_path != "":
         try:
-            if is_nerf_synthetic:
+            if cam_info.depth_unit == "mm":  # ADAM CHANGE: metric mm depth -> inverse depth, 0 where there is no reading
+                depth = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 1000
+                invdepthmap = np.where(depth > 0, 1 / np.maximum(depth, 1e-3), 0).astype(np.float32)
+            elif is_nerf_synthetic:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 512
             else:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / float(2**16)
