@@ -179,14 +179,18 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     if eval:
         if "360" in path:
             llffhold = 8
-        if llffhold:
+        # ADAM CHANGE: an explicit sparse/0/test.txt takes precedence over the every-Nth LLFF hold-out
+        test_txt = os.path.join(path, "sparse/0", "test.txt")
+        if os.path.exists(test_txt):
+            with open(test_txt, 'r') as file:
+                test_cam_names_list = [line.strip() for line in file]
+        elif llffhold:
             print("------------LLFF HOLD-------------")
             cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]
             cam_names = sorted(cam_names)
             test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]
         else:
-            with open(os.path.join(path, "sparse/0", "test.txt"), 'r') as file:
-                test_cam_names_list = [line.strip() for line in file]
+            test_cam_names_list = []
     else:
         test_cam_names_list = []
 
