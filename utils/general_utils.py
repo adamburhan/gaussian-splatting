@@ -131,3 +131,18 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+    
+    
+# ADAM CHANGE: quaternions that rotate the z axis onto given normals; a Gaussian whose third scale is
+# small is then a disc tangent to the surface (used for the completion Gaussians at init)
+# This function asks: "How should I rotate this Gaussian so its thin direction matches the surface normal?"
+def rotation_from_normals(n):
+    """Unit quaternions (w, x, y, z) of the shortest-arc rotation taking z = (0, 0, 1) onto each row of n [N, 3],
+    so that build_rotation(q)[:, :, 2] == n. For unit a, b the shortest arc is q ∝ (1 + a·b, a × b); with a = z
+    that is (1 + n_z, -n_y, n_x, 0). The antipodal case n = -z is degenerate (both terms vanish): any half turn
+    about an axis in the plane works, we take x."""
+    n = n / n.norm(dim=1, keepdim=True)
+    q = torch.stack([1 + n[:, 2], -n[:, 1], n[:, 0], torch.zeros_like(n[:, 0])], 1)
+    flipped = 1 + n[:, 2] < 1e-6
+    q[flipped] = torch.tensor([0.0, 1.0, 0.0, 0.0], device=n.device)
+    return q / q.norm(dim=1, keepdim=True)

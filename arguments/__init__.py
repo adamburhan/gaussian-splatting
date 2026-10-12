@@ -53,6 +53,14 @@ class ModelParams(ParamGroup):
         self._depths = ""
         # ADAM CHANGE: depth map format, "encoded" (16-bit inverse depth + depth_params.json, the 3DGS default) or "mm" (metric uint16 millimetres)
         self.depth_unit = "encoded"
+        # ADAM CHANGE: completion Gaussians from the shape prior (a PLY with x y z nx ny nz red green blue object)
+        self.completion = ""                # path; empty = none
+        self.completion_opacity = 0.9       # initial opacity (ordinary init points get 0.1)
+        self.completion_thickness = 0.002    # scale along the normal [m]: a disc on the surface
+        # ADAM CHANGE: which gradients the completion Gaussians receive. all: trained like any Gaussian;
+        # colour_frozen: DC and SH gradients zeroed, geometry and opacity train; shape_only: observation-loss
+        # gradients zeroed on every parameter, only a shape loss may move them (not implemented yet)
+        self.completion_gradients = "colour_frozen"
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False

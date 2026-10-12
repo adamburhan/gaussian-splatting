@@ -50,6 +50,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    if dataset.completion_gradients == "shape_only":  # ADAM CHANGE
+        raise NotImplementedError("completion_gradients=shape_only needs a shape loss")
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -140,6 +142,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         loss.backward()
+
+        if dataset.completion_gradients == "colour_frozen" and gaussians.completed.any():  # ADAM CHANGE: completion colour is kept as supplied
+            for param in (gaussians._features_dc, gaussians._features_rest):
+                param.grad[gaussians.completed] = 0
 
         iter_end.record()
 

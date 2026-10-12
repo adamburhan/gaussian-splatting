@@ -11,7 +11,7 @@
 
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, rotation_from_normals  # ADAM CHANGE: rotation_from_normals
 from torch import nn
 import os
 import json
@@ -58,6 +58,7 @@ class GaussianModel:
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
+        self.completion_index = torch.empty(0, dtype=torch.long)  # ADAM CHANGE: see create_from_pcd; empty when there is no completion
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
@@ -112,6 +113,11 @@ class GaussianModel:
         return self._xyz
     
     @property
+    def completed(self):  # ADAM CHANGE: boolean mask of the completion Gaussians
+        return self.completion_index >= 0
+
+    
+    @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
@@ -146,8 +152,26 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
+    def create_from_pcd(
+        self, 
+        pcd : BasicPointCloud, 
+        cam_infos : int, 
+        spatial_lr_scale : float,
+        completion=None,
+        completion_opacity=0.9,
+        completion_thickness=0.002,
+        completion_objects=None
+    ):
         self.spatial_lr_scale = spatial_lr_scale
+        
+        # ADAM CHANGE: completion points are appended after the init cloud so the lines below treat them as
+        # ordinary points (SH colour, kNN scale); what differs for them is overridden afterwards with [-n:]
+        n = 0 if completion is None else len(completion.points)
+        if n:
+            pcd = BasicPointCloud(points=np.concatenate([pcd.points, completion.points]),
+                                  colors=np.concatenate([pcd.colors, completion.colors]), normals=None)
+            print("Number of completion points : ", n)
+            
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -160,8 +184,21 @@ class GaussianModel:
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
+        
+        if n:  # ADAM CHANGE: discs on the surface, thin along the normal; in-plane scale stays the kNN rule
+            rots[-n:] = rotation_from_normals(torch.tensor(np.asarray(completion.normals)).float().cuda())
+            scales[-n:, 2] = np.log(completion_thickness)
 
-        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        opacities = 0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
+        if n:  # ADAM CHANGE: completion starts opaque; no training pixel would raise it from 0.1
+            opacities[-n:] = completion_opacity
+        opacities = self.inverse_opacity_activation(opacities)
+        # ADAM CHANGE: row of the completion PLY each Gaussian came from, -1 for ordinary ones
+        self.completion_index = torch.full((fused_point_cloud.shape[0],), -1, dtype=torch.long, device="cuda")
+        if n:
+            self.completion_index[-n:] = torch.arange(n, device="cuda")
+
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -256,7 +293,10 @@ class GaussianModel:
         PlyData([el]).write(path)
 
     def reset_opacity(self):
-        opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        opacities_new = torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01)
+        # ADAM CHANGE: completion Gaussians keep their opacity; no training pixel could raise them back after a reset
+        opacities_new = torch.where(self.completed[:, None], self.get_opacity, opacities_new)
+        opacities_new = self.inverse_opacity_activation(opacities_new)
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
@@ -361,6 +401,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        self.completion_index = self.completion_index[valid_points_mask]  # ADAM CHANGE
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -385,7 +426,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_completion_index):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -402,6 +443,7 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
+        self.completion_index = torch.cat((self.completion_index, new_completion_index))  # ADAM CHANGE
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
@@ -426,8 +468,9 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
+        new_completion_index = self.completion_index[selected_pts_mask].repeat(N)  # ADAM CHANGE
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii, new_completion_index)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -446,8 +489,9 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
+        new_completion_index = self.completion_index[selected_pts_mask]  # ADAM CHANGE
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_completion_index)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
@@ -469,5 +513,10 @@ class GaussianModel:
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        if self.completion_index.numel():  # ADAM CHANGE: completion Gaussians accumulate no view-space gradient, so they never clone or split
+            # (radii > 0).nonzero() is an index tensor [M, 1], not a boolean mask: filter the indices. The guard is for load_ply
+            # models, where completion_index is empty; after create_from_pcd it always has one entry per Gaussian
+            idx = update_filter.reshape(-1)
+            update_filter = idx[~self.completed[idx]][:, None]
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1

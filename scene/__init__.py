@@ -13,10 +13,18 @@ import os
 import random
 import json
 from utils.system_utils import searchForMaxIteration
-from scene.dataset_readers import sceneLoadTypeCallbacks
+import numpy as np
+from plyfile import PlyData
+from scene.dataset_readers import sceneLoadTypeCallbacks, fetchPly
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+
+# ADAM CHANGE: completion Gaussians supplied by the shape prior (positions, normals, colours, object index)
+def read_completion(path):
+    cloud = fetchPly(path)
+    objects = np.asarray(PlyData.read(path)["vertex"]["object"]).astype(np.int64)
+    return cloud, objects
 
 class Scene:
 
@@ -81,7 +89,13 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            #self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            
+            # ADAM CHANGE: completion Gaussians appended to the init cloud
+            completion, completion_objects = read_completion(args.completion) if args.completion else (None, None)
+            self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent,
+                                           completion=completion, completion_opacity=args.completion_opacity,
+                                           completion_thickness=args.completion_thickness, completion_objects=completion_objects)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
