@@ -59,8 +59,19 @@ class ModelParams(ParamGroup):
         self.completion_thickness = 0.002    # scale along the normal [m]: a disc on the surface
         # ADAM CHANGE: which gradients the completion Gaussians receive. all: trained like any Gaussian;
         # colour_frozen: DC and SH gradients zeroed, geometry and opacity train; shape_only: observation-loss
-        # gradients zeroed on every parameter, only a shape loss may move them (not implemented yet)
+        # gradients zeroed on every parameter, only a shape loss (with shape_targets completion | all) may move
+        # them; without a shape loss this is the fully frozen arm
         self.completion_gradients = "colour_frozen"
+        # ADAM CHANGE: shape losses (utils/shape_loss.py) on the Gaussians near the prior's object surfaces
+        self.shape = ""                     # prior directory (objects.json + distance/<label>.npz); empty = none
+        self.shape_loss = "centre"          # centre | surface | band
+        self.shape_targets = "ordinary"     # which Gaussians the loss may act on: ordinary | completion | all
+        self.shape_radius = 0.15            # ownership: centre within this distance of an object's surface [m]
+        self.shape_refresh = 100            # iterations between ownership updates
+        self.shape_spread = 1.0             # surface: weight of the variance-along-the-normal term
+        self.shape_tolerance = 0.005        # surface: free thickness [m]
+        self.shape_delta = 0.02             # band: free distance to the surface [m]
+        self.shape_samples = 16             # band: reparameterised draws per Gaussian
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False
@@ -105,6 +116,7 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
+        self.shape_weight = 1.0  # ADAM CHANGE: weight of the shape loss (squared metres per Gaussian)
         self.random_background = False
         self.optimizer_type = "default"
         super().__init__(parser, "Optimization Parameters")

@@ -17,6 +17,7 @@ from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
+from utils.shape_loss import ShapePrior, LOSSES, target_mask  # ADAM CHANGE
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -50,8 +51,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
-    if dataset.completion_gradients == "shape_only":  # ADAM CHANGE
-        raise NotImplementedError("completion_gradients=shape_only needs a shape loss")
+    shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh) if dataset.shape else None  # ADAM CHANGE
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -141,11 +141,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
-        loss.backward()
+        # ADAM CHANGE: shape loss on the Gaussians owned by a prior object (utils/shape_loss.py)
+        shape_term = None
+        if shape_prior is not None and opt.shape_weight > 0:
+            owner = shape_prior.maybe_refresh(gaussians.get_xyz, iteration)
+            owner = torch.where(target_mask(gaussians, dataset.shape_targets), owner, torch.full_like(owner, -1))
+            shape_raw, n_shape = LOSSES[dataset.shape_loss](shape_prior, gaussians.get_xyz, gaussians.get_scaling, gaussians.get_rotation, owner,
+                                                            spread=dataset.shape_spread, tolerance=dataset.shape_tolerance,
+                                                            delta=dataset.shape_delta, samples=dataset.shape_samples)
+            shape_term = opt.shape_weight * shape_raw
+            if iteration % 1000 == 0:
+                print(f"\n[ITER {iteration}] shape loss {shape_raw.item():.6f} on {n_shape} Gaussians; owned: "
+                      + ", ".join(f"{k} {v}" for k, v in shape_prior.stats().items()))
 
-        if dataset.completion_gradients == "colour_frozen" and gaussians.completed.any():  # ADAM CHANGE: completion colour is kept as supplied
-            for param in (gaussians._features_dc, gaussians._features_rest):
+        # ADAM CHANGE: gradient policy for the completion Gaussians (see arguments: completion_gradients)
+        if dataset.completion_gradients == "shape_only":
+            loss.backward()  # observation losses only; the shape term is a separate graph on the parameters
+            for param in (gaussians._xyz, gaussians._features_dc, gaussians._features_rest, gaussians._opacity, gaussians._scaling, gaussians._rotation):
                 param.grad[gaussians.completed] = 0
+            if shape_term is not None:  # without a shape loss this is the fully frozen arm
+                shape_term.backward()
+        else:
+            if shape_term is not None:
+                loss = loss + shape_term
+            loss.backward()
+            if dataset.completion_gradients == "colour_frozen" and gaussians.completed.any():
+                for param in (gaussians._features_dc, gaussians._features_rest):
+                    param.grad[gaussians.completed] = 0
 
         iter_end.record()
 
