@@ -66,6 +66,7 @@ class ModelParams(ParamGroup):
         self.shape = ""                     # prior directory (objects.json + distance/<label>.npz); empty = none
         self.shape_loss = "centre"          # centre | surface | band
         self.shape_targets = "ordinary"     # which Gaussians the loss may act on: ordinary | completion | all
+        self.shape_opacity = "none"         # weight each Gaussian's penalty by its opacity: none | detached | trainable
         self.shape_radius = 0.15            # ownership: centre within this distance of an object's surface [m]
         self.shape_refresh = 100            # iterations between ownership updates
         self.shape_spread = 1.0             # surface: weight of the variance-along-the-normal term

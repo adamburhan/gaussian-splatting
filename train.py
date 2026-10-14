@@ -147,6 +147,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             owner = shape_prior.maybe_refresh(gaussians.get_xyz, iteration)
             owner = torch.where(target_mask(gaussians, dataset.shape_targets), owner, torch.full_like(owner, -1))
             shape_raw, n_shape = LOSSES[dataset.shape_loss](shape_prior, gaussians.get_xyz, gaussians.get_scaling, gaussians.get_rotation, owner,
+                                                            opacity=gaussians.get_opacity, opacity_weight=dataset.shape_opacity,
                                                             spread=dataset.shape_spread, tolerance=dataset.shape_tolerance,
                                                             delta=dataset.shape_delta, samples=dataset.shape_samples)
             shape_term = opt.shape_weight * shape_raw

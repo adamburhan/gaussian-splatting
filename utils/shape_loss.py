@@ -18,9 +18,13 @@ owned Gaussians (of the chosen target set) of a per-Gaussian penalty in squared 
     band      E_X[(d(X) - delta)_+^2]                 X ~ N(mu, Sigma), `samples` reparameterised draws: the whole
                                                       Gaussian within `delta` of the surface, curved or not
 
-A loss takes (prior, xyz, scaling, rotation, owner, **params) and returns (value, number of Gaussians it
-acted on). xyz / scaling / rotation are the model's activated tensors; owner is -1 where a Gaussian is not
-constrained. Device-agnostic (CPU tests).
+Each per-Gaussian penalty may be weighted by the Gaussian's opacity (`opacity_weight`): "none" (weight 1),
+"detached" (alpha as a constant: transparent Gaussians stop pulling gradient) or "trainable" (gradient flows
+into alpha too: a Gaussian far from the surface may fade instead of moving).
+
+A loss takes (prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", **params) and returns
+(value, number of Gaussians it acted on). xyz / scaling / rotation / opacity are the model's activated tensors;
+owner is -1 where a Gaussian is not constrained. Device-agnostic (CPU tests).
 """
 
 import json
@@ -120,15 +124,23 @@ def _zero(xyz):
     return xyz.sum() * 0.0, 0
 
 
-def centre(prior, xyz, scaling, rotation, owner, **_):
+def _weights(opacity, m, mode):
+    """Per-Gaussian weight of the penalty: 1, or the opacity (constant or trainable)."""
+    if mode == "none":
+        return 1.0
+    w = opacity[m].reshape(-1)
+    return w.detach() if mode == "detached" else w
+
+
+def centre(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", **_):
     m = owner >= 0
     if not m.any():
         return _zero(xyz)
     d = prior.distance(xyz[m], owner[m])
-    return (d ** 2).mean(), int(m.sum())
+    return (_weights(opacity, m, opacity_weight) * d ** 2).mean(), int(m.sum())
 
 
-def surface(prior, xyz, scaling, rotation, owner, spread=1.0, tolerance=0.005, **_):
+def surface(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", spread=1.0, tolerance=0.005, **_):
     m = owner >= 0
     if not m.any():
         return _zero(xyz)
@@ -136,18 +148,18 @@ def surface(prior, xyz, scaling, rotation, owner, spread=1.0, tolerance=0.005, *
     n = prior.normal(xyz[m].detach(), owner[m])
     v = (quaternion_to_matrix(rotation[m]).transpose(1, 2) @ n[..., None])[..., 0]  # normal in the Gaussian's frame
     variance = (scaling[m] ** 2 * v ** 2).sum(1)  # n^T R S^2 R^T n
-    return (d ** 2 + spread * torch.relu(variance - tolerance ** 2)).mean(), int(m.sum())
+    return (_weights(opacity, m, opacity_weight) * (d ** 2 + spread * torch.relu(variance - tolerance ** 2))).mean(), int(m.sum())
 
 
-def band(prior, xyz, scaling, rotation, owner, delta=0.02, samples=16, **_):
+def band(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", delta=0.02, samples=16, **_):
     m = owner >= 0
     if not m.any():
         return _zero(xyz)
     R = quaternion_to_matrix(rotation[m])
     eps = torch.randn(samples, int(m.sum()), 3, device=xyz.device, dtype=xyz.dtype)
     X = xyz[m] + (R @ (scaling[m] * eps)[..., None])[..., 0]  # [S, M, 3]
-    d = prior.distance(X.reshape(-1, 3), owner[m].repeat(samples))
-    return (torch.relu(d - delta) ** 2).mean(), int(m.sum())
+    d = prior.distance(X.reshape(-1, 3), owner[m].repeat(samples)).reshape(samples, -1)
+    return (_weights(opacity, m, opacity_weight) * (torch.relu(d - delta) ** 2).mean(0)).mean(), int(m.sum())
 
 
 LOSSES = {"centre": centre, "surface": surface, "band": band}
