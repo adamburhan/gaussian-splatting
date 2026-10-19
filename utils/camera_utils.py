@@ -19,6 +19,8 @@ WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset):
     image = Image.open(cam_info.image_path)
+    if cam_info.mask_path != "":  # ADAM CHANGE: ScanNet++ (ported from the fork's main branch)
+        image.putalpha(Image.open(cam_info.mask_path).convert("L"))  # PILtoTorch hands a 4th channel to Camera as alpha_mask
 
     if cam_info.depth_path != "":
         try:
@@ -63,11 +65,22 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
+    if invdepthmap is not None and cam_info.depth_unit == "mm":  # ADAM CHANGE: ScanNet++ (ported from the fork's main branch)
+        # sensor depth (e.g. 256x192 iPhone LiDAR) reaches the training resolution here by nearest
+        # neighbour so depth edges are not blended; Camera's linear resize is then the identity
+        invdepthmap = cv2.resize(invdepthmap, resolution, interpolation=cv2.INTER_NEAREST)
+
+    principal_point = None
+    if cam_info.intrinsics is not None:  # ADAM CHANGE
+        principal_point = (cam_info.intrinsics["cx"] / cam_info.intrinsics["width"],
+                           cam_info.intrinsics["cy"] / cam_info.intrinsics["height"])
+
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   image=image, invdepthmap=invdepthmap,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
-                  train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
+                  train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test,
+                  principal_point=principal_point)  # ADAM CHANGE
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
     camera_list = []
