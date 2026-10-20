@@ -153,6 +153,8 @@ def read_points3D_binary(path_to_model_file):
             errors[p_id] = error
     return xyzs, rgbs, errors
 
+# ADAM CHANGE: ScanNet++ (ported from the fork's main branch): the iPhone camera is OPENCV; its first four
+# parameters are the pinhole K, as the official toolbox uses them
 def read_intrinsics_text(path):
     """
     Taken from https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_model.py
@@ -168,7 +170,7 @@ def read_intrinsics_text(path):
                 elems = line.split()
                 camera_id = int(elems[0])
                 model = elems[1]
-                assert model == "PINHOLE", "While the loader support other types, the rest of the code assumes PINHOLE"
+                assert model in ("PINHOLE", "OPENCV"), "While the loader support other types, the rest of the code assumes PINHOLE (OPENCV is undistorted at load time)"
                 width = int(elems[2])
                 height = int(elems[3])
                 params = np.array(tuple(map(float, elems[4:])))
