@@ -317,9 +317,10 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
     return scene_info
 
 # ADAM CHANGE: ScanNet++ (ported from the fork's main branch)
-def readScannetppInfo(path, depths):
+def readScannetppInfo(path, depths, dslr_folder="dslr_undistorted_by_iphone"):
     """ScanNet++ iPhone NVS benchmark: train on the registered iPhone frames, test on the held-out
-    DSLR views that the official toolbox undistorted with the iPhone intrinsics. Both COLMAP models
+    DSLR views that the official toolbox undistorted with the iPhone intrinsics (dslr_folder: the official
+    16-view folder, or the _ext one tools/split_views.py writes for the extrapolation split). Both COLMAP models
     are expressed in the scan's world frame, so their poses can be mixed directly.
     The iPhone camera is treated as the pinhole K, as the toolbox does."""
     iphone = os.path.join(path, "iphone")
@@ -344,7 +345,7 @@ def readScannetppInfo(path, depths):
         depth_path = os.path.join(path, depths, stem + ".png") if depths != "" else ""
         train_cam_infos.append(camera_info(extr, iphone, "rgb", "rgb_masks", depth_path, False, intrinsics))
 
-    dslr = os.path.join(path, "dslr_undistorted_by_iphone")
+    dslr = os.path.join(path, dslr_folder)
     with open(os.path.join(dslr, "nerfstudio/transforms.json")) as f:
         test_names = {frame["file_path"] for frame in json.load(f)["test_frames"]}
     test_cam_infos = []

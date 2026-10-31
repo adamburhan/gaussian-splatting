@@ -15,6 +15,8 @@ import os
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
+import numpy as np
+from PIL import Image
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
@@ -28,27 +30,34 @@ except:
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+    out = os.path.join(model_path, name, "ours_{}".format(iteration))
+    render_path, depth_path, alpha_path = (os.path.join(out, d) for d in ("renders", "depth", "alpha"))
+    for d in (render_path, depth_path, alpha_path):
+        makedirs(d, exist_ok=True)
 
-    makedirs(render_path, exist_ok=True)
-    makedirs(gts_path, exist_ok=True)
-
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+    # ADAM CHANGE: files keep the source image names so the evaluators can pair them with their ground truth;
+    # ground truth is not copied. Next to the RGB, the benchmark's depth convention (docs/contract.md): the
+    # opacity-normalised expected depth sum(w z) / sum(w) in metres as uint16 mm, 0 where the accumulated
+    # opacity sum(w) is below 0.5, and that opacity as uint8. Both come from one extra unclamped pass
+    # rasterizing [1, z, z] as colours over a black background, z the view-space depth of each centre.
+    black = torch.zeros(3, dtype=torch.float32, device="cuda")
+    for view in tqdm(views, desc="Rendering progress"):
         rendering = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
-        gt = view.original_image[0:3, :, :]
+        xyz = gaussians.get_xyz
+        view_t = view.world_view_transform  # stored transposed: camera coordinates = [x, 1] @ view_t
+        z = (xyz @ view_t[:3, 2] + view_t[3, 2]).clamp(min=0.2)  # the rasterizer culls z < 0.2
+        accumulated = render(view, gaussians, pipeline, black, override_color=torch.stack([torch.ones_like(z), z, z], 1),
+                             clamp_output=False)["render"]
+        alpha, z_sum = accumulated[0], accumulated[1]
+        expected_depth = torch.where(alpha >= 0.5, z_sum / alpha.clamp(min=1e-3), torch.zeros_like(alpha))
 
         if args.train_test_exp:
             rendering = rendering[..., rendering.shape[-1] // 2:]
-            gt = gt[..., gt.shape[-1] // 2:]
 
-        
-        # SAVE IMAGE NAME INSTEAD OF INDEX (ADAM CHANGE)
-        # torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        # torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         stem = os.path.splitext(view.image_name)[0]
         torchvision.utils.save_image(rendering, os.path.join(render_path, stem + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, stem + ".png"))
+        Image.fromarray((expected_depth * 1000).round().clamp(0, 65535).cpu().numpy().astype(np.uint16)).save(os.path.join(depth_path, stem + ".png"))
+        Image.fromarray((alpha * 255).round().clamp(0, 255).cpu().numpy().astype(np.uint8)).save(os.path.join(alpha_path, stem + ".png"))
         
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):

@@ -50,7 +50,7 @@ class Scene:
 
         if os.path.exists(os.path.join(args.source_path, "iphone", "colmap")):  # ADAM CHANGE: ScanNet++ (ported from the fork's main branch)
             print("Found iphone/colmap, assuming ScanNet++ scene!")
-            scene_info = sceneLoadTypeCallbacks["Scannetpp"](args.source_path, args.depths)
+            scene_info = sceneLoadTypeCallbacks["Scannetpp"](args.source_path, args.depths, args.dslr_folder)
         elif os.path.exists(os.path.join(args.source_path, "sparse")):
             # ADAM CHANGE: depth_unit forwarded to the COLMAP reader
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp, depth_unit=args.depth_unit)
