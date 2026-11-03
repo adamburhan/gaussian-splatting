@@ -59,6 +59,7 @@ class GaussianModel:
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.completion_index = torch.empty(0, dtype=torch.long)  # ADAM CHANGE: see create_from_pcd; empty when there is no completion
+        self.training_state = {}  # ADAM CHANGE: train.py's resume state, carried by the checkpoint
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
@@ -80,9 +81,18 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            dict(completion_index=self.completion_index,  # ADAM CHANGE: identities, exposure and resume state
+                 exposure=self._exposure, exposure_mapping=self.exposure_mapping,
+                 exposure_optimizer=self.exposure_optimizer.state_dict(),
+                 training_state=self.training_state),
         )
     
     def restore(self, model_args, training_args):
+        if len(model_args) not in (12, 13):
+            raise ValueError("Unsupported Gaussian checkpoint format")
+        metadata = model_args[12] if len(model_args) == 13 else None  # ADAM CHANGE
+        if metadata is None and self.completed.any():
+            raise ValueError("Legacy completion checkpoint has no source identities; cannot resume safely")
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -94,11 +104,21 @@ class GaussianModel:
         xyz_gradient_accum, 
         denom,
         opt_dict, 
-        self.spatial_lr_scale) = model_args
+        self.spatial_lr_scale) = model_args[:12]
+        self.completion_index = (metadata["completion_index"].to(self._xyz.device) if metadata else
+                                 torch.full((len(self._xyz),), -1, dtype=torch.long, device=self._xyz.device))
+        if len(self.completion_index) != len(self._xyz):
+            raise ValueError("Checkpoint completion identities do not match its Gaussians")
+        if metadata is not None:
+            self._exposure = nn.Parameter(metadata["exposure"].to(self._xyz.device))
+            self.exposure_mapping = metadata["exposure_mapping"]
+            self.training_state = metadata["training_state"]
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+        if metadata is not None:
+            self.exposure_optimizer.load_state_dict(metadata["exposure_optimizer"])
 
     @property
     def get_scaling(self):

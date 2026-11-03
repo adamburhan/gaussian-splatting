@@ -10,6 +10,9 @@
 #
 
 import os
+from pathlib import Path
+import random
+import numpy as np
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -53,7 +56,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.training_setup(opt)
     shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh) if dataset.shape else None  # ADAM CHANGE
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -67,6 +70,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
+    state = gaussians.training_state  # ADAM CHANGE: resume the view order, RNG streams and shape ownership
+    if state:
+        cameras = {camera.image_name: camera for camera in scene.getTrainCameras()}
+        viewpoint_stack = [cameras[name] for name in state["remaining_views"]]
+        viewpoint_indices = state["viewpoint_indices"]
+        random.setstate(state["python_rng"])
+        np.random.set_state(state["numpy_rng"])
+        torch.set_rng_state(state["torch_rng"].cpu())
+        torch.cuda.set_rng_state_all([value.cpu() for value in state["cuda_rng"]])
+        if shape_prior is not None and "shape_labels" in state:
+            if shape_prior.labels != state["shape_labels"]:
+                raise ValueError("Checkpoint shape labels disagree with the active prior")
+            owner = state["shape_owner"]
+            shape_prior.owner = owner.to(gaussians.get_xyz.device) if owner is not None else None
+            shape_prior.last_refresh = state["shape_last_refresh"]
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
@@ -185,10 +203,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
-
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
@@ -214,9 +228,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
 
-            if (iteration in checkpoint_iterations):
+            if (iteration in saving_iterations):  # ADAM CHANGE: after the step, so the saved model matches the checkpoint
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+            if (iteration in checkpoint_iterations):  # ADAM CHANGE: resumable checkpoint, written atomically, only the latest kept
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                gaussians.training_state = dict(
+                    remaining_views=[camera.image_name for camera in viewpoint_stack],
+                    viewpoint_indices=viewpoint_indices, python_rng=random.getstate(),
+                    numpy_rng=np.random.get_state(), torch_rng=torch.get_rng_state(),
+                    cuda_rng=torch.cuda.get_rng_state_all())
+                if shape_prior is not None:
+                    gaussians.training_state.update(shape_labels=shape_prior.labels, shape_owner=shape_prior.owner,
+                                                    shape_last_refresh=shape_prior.last_refresh)
+                path = Path(scene.model_path) / f"chkpnt{iteration}.pth"
+                temporary = path.with_suffix(".pth.tmp")
+                torch.save((gaussians.capture(), iteration), temporary)
+                temporary.replace(path)
+                for old in path.parent.glob("chkpnt*.pth"):
+                    if int(old.stem[6:]) < iteration:
+                        old.unlink()
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

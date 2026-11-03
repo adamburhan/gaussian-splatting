@@ -53,6 +53,9 @@ class ModelParams(ParamGroup):
         self._depths = ""
         # ADAM CHANGE: ScanNet++ folder of the undistorted DSLR test views (tools/split_views.py writes the _ext one)
         self.dslr_folder = "dslr_undistorted_by_iphone"
+        self.train_images = "iphone/rgb"
+        self.train_sparse = "iphone/colmap"
+        self.train_masks = "iphone/rgb_masks"
         # ADAM CHANGE: depth map format, "encoded" (16-bit inverse depth + depth_params.json, the 3DGS default) or "mm" (metric uint16 millimetres)
         self.depth_unit = "encoded"
         # ADAM CHANGE: completion Gaussians from the shape prior (a PLY with x y z nx ny nz red green blue object)
