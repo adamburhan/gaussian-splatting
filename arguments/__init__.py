@@ -73,11 +73,17 @@ class ModelParams(ParamGroup):
         self.shape_targets = "ordinary"     # which Gaussians the loss may act on: ordinary | completion | all
         self.shape_opacity = "none"         # weight each Gaussian's penalty by its opacity: none | detached | trainable
         self.shape_radius = 0.15            # ownership: centre within this distance of an object's surface [m]
+        self.shape_radius_scale = 0.0       # ownership radius is at least this fraction of the object's box diagonal
+        self.shape_robust = "none"          # distance penalty: none (d^2) | huber
+        self.shape_robust_scale = 0.03      # huber: quadratic within this distance [m], linear beyond
+        self.shape_ownership = "surface"    # surface: any surface within radius | unseen: also within radius of the object's completion samples
         self.shape_refresh = 100            # iterations between ownership updates
         self.shape_spread = 1.0             # surface: weight of the variance-along-the-normal term
         self.shape_tolerance = 0.005        # surface: free thickness [m]
         self.shape_delta = 0.02             # band: free distance to the surface [m]
         self.shape_samples = 16             # band: reparameterised draws per Gaussian
+        self.shape_colour_weight = 0.0      # seed colour loss: completion DC toward its object's ordinary neighbours' mean; 0 = off
+        self.shape_colour_radius = 0.10     # seed colour loss: neighbourhood radius [m]
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False

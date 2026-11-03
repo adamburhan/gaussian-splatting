@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
 import os
 from pathlib import Path
 import random
@@ -18,9 +19,9 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel
+from scene import Scene, GaussianModel, read_completion
 from utils.general_utils import safe_state, get_expon_lr_func
-from utils.shape_loss import ShapePrior, LOSSES, target_mask  # ADAM CHANGE
+from utils.shape_loss import ShapePrior, LOSSES, target_mask, seed_colour  # ADAM CHANGE
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -54,7 +55,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
-    shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh) if dataset.shape else None  # ADAM CHANGE
+    shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh, ownership=dataset.shape_ownership,
+                             radius_scale=dataset.shape_radius_scale) if dataset.shape else None  # ADAM CHANGE
+    if shape_prior is not None and dataset.shape_ownership == "unseen":  # ADAM CHANGE: the completion samples are the unseen surface
+        if not dataset.completion:
+            sys.exit("shape_ownership unseen needs --completion")
+        cloud, objects = read_completion(dataset.completion)
+        names = json.load(open(Path(dataset.completion).with_suffix(".json")))["objects"]
+        shape_prior.set_seeds(torch.tensor(np.asarray(cloud.points)).float().cuda(), torch.tensor(objects).cuda(), names)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
@@ -160,18 +168,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         # ADAM CHANGE: shape loss on the Gaussians owned by a prior object (utils/shape_loss.py)
-        shape_term = None
+        shape_term, colour_term = None, None
         if shape_prior is not None and opt.shape_weight > 0:
             owner = shape_prior.maybe_refresh(gaussians.get_xyz, iteration)
             owner = torch.where(target_mask(gaussians, dataset.shape_targets), owner, torch.full_like(owner, -1))
             shape_raw, n_shape = LOSSES[dataset.shape_loss](shape_prior, gaussians.get_xyz, gaussians.get_scaling, gaussians.get_rotation, owner,
                                                             opacity=gaussians.get_opacity, opacity_weight=dataset.shape_opacity,
                                                             spread=dataset.shape_spread, tolerance=dataset.shape_tolerance,
-                                                            delta=dataset.shape_delta, samples=dataset.shape_samples)
+                                                            delta=dataset.shape_delta, samples=dataset.shape_samples,
+                                                            robust=dataset.shape_robust, robust_scale=dataset.shape_robust_scale)
             shape_term = opt.shape_weight * shape_raw
+            if dataset.shape_colour_weight > 0:  # ADAM CHANGE: seed colour loss on the completion Gaussians' DC
+                colour_raw, n_colour = seed_colour(shape_prior, gaussians.get_xyz, gaussians._features_dc, shape_prior.owner,
+                                                   gaussians.completed, radius=dataset.shape_colour_radius)
+                colour_term = dataset.shape_colour_weight * colour_raw
             if iteration % 1000 == 0:
                 print(f"\n[ITER {iteration}] shape loss {shape_raw.item():.6f} on {n_shape} Gaussians; owned: "
-                      + ", ".join(f"{k} {v}" for k, v in shape_prior.stats().items()))
+                      + ", ".join(f"{k} {v}" for k, v in shape_prior.stats().items())
+                      + (f"; colour loss {colour_raw.item():.6f} on {n_colour} seeds" if colour_term is not None else ""))
 
         # ADAM CHANGE: gradient policy for the completion Gaussians (see arguments: completion_gradients)
         if dataset.completion_gradients == "shape_only":
@@ -187,6 +201,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if dataset.completion_gradients == "colour_frozen" and gaussians.completed.any():
                 for param in (gaussians._features_dc, gaussians._features_rest):
                     param.grad[gaussians.completed] = 0
+        if colour_term is not None:  # ADAM CHANGE: its own graph on the seeds' DC, applied after the gradient policy
+            colour_term.backward()
 
         iter_end.record()
 

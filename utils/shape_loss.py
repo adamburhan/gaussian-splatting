@@ -8,15 +8,21 @@ in x. The normal n(x) (detached) comes from central differences of the SIGNED fi
 difference cancels along the normal, and that is exactly where the Gaussians sit. Without an inside mask the
 unsigned field is used and normals on the surface are unreliable.
 
-Ownership: a Gaussian belongs to the object whose surface is nearest if that distance is below `radius`,
-recomputed every `refresh` iterations and whenever the Gaussian count changes. Every loss is a mean over the
-owned Gaussians (of the chosen target set) of a per-Gaussian penalty in squared metres:
+Ownership: a Gaussian belongs to the object whose surface is nearest if that distance is below the object's
+radius, max(`radius`, `radius_scale` x the object's box diagonal), recomputed every `refresh` iterations and
+whenever the Gaussian count changes. With `ownership` "unseen" it must
+also lie within `radius` of one of that object's completion samples (set_seeds: the unseen surface), so the
+seen surface stays unconstrained. Every loss is a mean over the owned Gaussians (of the chosen target set) of a
+per-Gaussian penalty in squared metres:
 
-    centre    d^2                                     the centre on the surface
-    surface   d^2 + spread * (n^T Sigma n - tol^2)_+  ... and thin across it: n^T Sigma n is the variance along
+    centre    p(d)                                    the centre on the surface
+    surface   p(d) + spread * (n^T Sigma n - tol^2)_+  ... and thin across it: n^T Sigma n is the variance along
                                                       the normal, so d^2 + n^T Sigma n = E[dist^2 to the local plane]
     band      E_X[(d(X) - delta)_+^2]                 X ~ N(mu, Sigma), `samples` reparameterised draws: the whole
                                                       Gaussian within `delta` of the surface, curved or not
+
+p(d) is d^2, or with `robust` "huber" the Huber penalty of scale `robust_scale`: quadratic within the scale,
+linear beyond, so a Gaussian far from the surface is pulled with a bounded force.
 
 Each per-Gaussian penalty may be weighted by the Gaussian's opacity (`opacity_weight`): "none" (weight 1),
 "detached" (alpha as a constant: transparent Gaussians stop pulling gradient) or "trainable" (gradient flows
@@ -25,6 +31,9 @@ into alpha too: a Gaussian far from the surface may fade instead of moving).
 A loss takes (prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", **params) and returns
 (value, number of Gaussians it acted on). xyz / scaling / rotation / opacity are the model's activated tensors;
 owner is -1 where a Gaussian is not constrained. Device-agnostic (CPU tests).
+
+seed_colour pulls each completion Gaussian's DC colour toward the mean DC colour (detached) of the ordinary
+Gaussians of the same object within `colour_radius`; the neighbour sets are rebuilt with the ownership.
 """
 
 import json
@@ -33,6 +42,8 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+CDIST_BLOCK = 2 ** 24  # entries of one pairwise-distance block
 
 
 def quaternion_to_matrix(q):
@@ -45,19 +56,30 @@ def quaternion_to_matrix(q):
 
 
 class ShapePrior:
-    def __init__(self, path, radius=0.15, refresh=100, device="cuda"):
+    def __init__(self, path, radius=0.15, refresh=100, device="cuda", ownership="surface", radius_scale=0.0):
         meta = json.load(open(os.path.join(path, "objects.json")))
         self.labels = [o["label"] for o in meta["objects"]]
-        self.radius, self.refresh, self.device = radius, refresh, device
+        self.refresh, self.device, self.ownership = refresh, device, ownership
         clamp = float(meta.get("dilate", 0.3))
-        self.grids, self.inside = [], []
+        self.grids, self.inside, diagonals = [], [], []
         for o in meta["objects"]:
             g = np.load(os.path.join(path, o["distance"]))
             self.grids.append((torch.tensor(g["origin"], device=device), float(g["spacing"]), clamp,
                                torch.tensor(g["values"].astype(np.float32), device=device)[None, None]))  # [1, 1, X, Y, Z]
             self.inside.append(torch.tensor(g["inside"].astype(np.float32), device=device)[None, None] if "inside" in g else None)
+            diagonals.append(np.linalg.norm((np.array(g["values"].shape) - 1) * float(g["spacing"]) - 2 * clamp))
+        self.radius = torch.tensor(np.maximum(radius, radius_scale * np.array(diagonals)), device=device, dtype=torch.float32)  # [K]
         self.owner = None  # [N] long, -1 = unconstrained
         self.last_refresh = -1
+        self.seeds = None  # per object, its completion samples [M_k, 3] (ownership "unseen")
+        self.pairs, self.pairs_key = None, None  # seed_colour's (seed, neighbour) index pairs and the ownership they match
+
+    def set_seeds(self, xyz, owner, names):
+        """Completion samples [M, 3] and their object index [M] into `names` (the completion PLY numbers the
+        selected objects; objects.json holds the accepted ones), kept per object of this prior."""
+        index = torch.tensor([self.labels.index(n) if n in self.labels else -1 for n in names], device=owner.device)
+        owner = index[owner]
+        self.seeds = [xyz[owner == k].to(self.device) for k in range(len(self.grids))]
 
     def sample_grid(self, k, xyz, signed=False):
         """Trilinear sample of object k's distance at xyz [N, 3], differentiable in xyz; clamp outside the grid.
@@ -78,9 +100,23 @@ class ShapePrior:
         return torch.stack([self.sample_grid(k, xyz) for k in range(len(self.grids))], 1)
 
     @torch.no_grad()
+    def seed_distance(self, xyz, owner):
+        """Distance from each Gaussian to the nearest completion sample of its object; inf where it has none."""
+        d = torch.full((xyz.shape[0],), float("inf"), device=xyz.device, dtype=xyz.dtype)
+        for k, seeds in enumerate(self.seeds):
+            m = (owner == k).nonzero()[:, 0]
+            if len(m) and len(seeds):
+                d[m] = torch.cat([torch.cdist(xyz[i], seeds).min(1).values for i in m.split(max(1, CDIST_BLOCK // len(seeds)))])
+        return d
+
+    @torch.no_grad()
     def assign(self, xyz):
         d, k = self.distances(xyz).min(1)
-        self.owner = torch.where(d < self.radius, k, torch.full_like(k, -1))
+        radius = self.radius[k]
+        owner = torch.where(d < radius, k, torch.full_like(k, -1))
+        if self.ownership == "unseen":
+            owner = torch.where(self.seed_distance(xyz, owner) < radius, owner, torch.full_like(k, -1))
+        self.owner = owner
         return self.owner
 
     def maybe_refresh(self, xyz, iteration):
@@ -132,15 +168,23 @@ def _weights(opacity, m, mode):
     return w.detach() if mode == "detached" else w
 
 
-def centre(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", **_):
+def _penalty(d, robust, scale):
+    """d^2, or Huber: d^2 within `scale`, linear beyond."""
+    if robust == "huber":
+        return torch.where(d.abs() <= scale, d ** 2, scale * (2 * d.abs() - scale))
+    return d ** 2
+
+
+def centre(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", robust="none", robust_scale=0.03, **_):
     m = owner >= 0
     if not m.any():
         return _zero(xyz)
     d = prior.distance(xyz[m], owner[m])
-    return (_weights(opacity, m, opacity_weight) * d ** 2).mean(), int(m.sum())
+    return (_weights(opacity, m, opacity_weight) * _penalty(d, robust, robust_scale)).mean(), int(m.sum())
 
 
-def surface(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", spread=1.0, tolerance=0.005, **_):
+def surface(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", spread=1.0, tolerance=0.005,
+            robust="none", robust_scale=0.03, **_):
     m = owner >= 0
     if not m.any():
         return _zero(xyz)
@@ -148,7 +192,8 @@ def surface(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="
     n = prior.normal(xyz[m].detach(), owner[m])
     v = (quaternion_to_matrix(rotation[m]).transpose(1, 2) @ n[..., None])[..., 0]  # normal in the Gaussian's frame
     variance = (scaling[m] ** 2 * v ** 2).sum(1)  # n^T R S^2 R^T n
-    return (_weights(opacity, m, opacity_weight) * (d ** 2 + spread * torch.relu(variance - tolerance ** 2))).mean(), int(m.sum())
+    penalty = _penalty(d, robust, robust_scale) + spread * torch.relu(variance - tolerance ** 2)
+    return (_weights(opacity, m, opacity_weight) * penalty).mean(), int(m.sum())
 
 
 def band(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", delta=0.02, samples=16, **_):
@@ -163,6 +208,36 @@ def band(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="non
 
 
 LOSSES = {"centre": centre, "surface": surface, "band": band}
+
+
+@torch.no_grad()
+def seed_neighbours(xyz, owner, completed, radius):
+    """Index pairs (seed, ordinary Gaussian) of the same object within radius, as two [P] tensors."""
+    seeds, neighbours = [], []
+    for k in owner[completed & (owner >= 0)].unique():
+        s, o = ((owner == k) & completed).nonzero()[:, 0], ((owner == k) & ~completed).nonzero()[:, 0]
+        if not len(o):
+            continue
+        for i in s.split(max(1, CDIST_BLOCK // len(o))):
+            a, b = (torch.cdist(xyz[i], xyz[o]) < radius).nonzero(as_tuple=True)
+            seeds.append(i[a])
+            neighbours.append(o[b])
+    empty = torch.zeros(0, dtype=torch.long, device=xyz.device)
+    return (torch.cat(seeds), torch.cat(neighbours)) if seeds else (empty, empty)
+
+
+def seed_colour(prior, xyz, features_dc, owner, completed, radius=0.10):
+    """Mean over the seeds with neighbours of the squared DC difference to their neighbours' mean, and that count."""
+    if prior.pairs_key != (prior.last_refresh, xyz.shape[0]):
+        prior.pairs = seed_neighbours(xyz.detach(), owner, completed, radius)
+        prior.pairs_key = (prior.last_refresh, xyz.shape[0])
+    seed, neighbour = prior.pairs
+    if not len(seed):
+        return _zero(features_dc)
+    count = torch.bincount(seed, minlength=xyz.shape[0])
+    total = torch.zeros_like(features_dc).index_add_(0, seed, features_dc[neighbour].detach())
+    has = count > 0
+    return ((features_dc[has] - total[has] / count[has, None, None]) ** 2).sum(-1).mean(), int(has.sum())
 
 
 def target_mask(gaussians, targets):
