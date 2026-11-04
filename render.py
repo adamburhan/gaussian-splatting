@@ -37,8 +37,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
     # ADAM CHANGE: files keep the source image names so the evaluators can pair them with their ground truth;
     # ground truth is not copied. Next to the RGB, the benchmark's depth convention (docs/contract.md): the
-    # opacity-normalised expected depth sum(w z) / sum(w) in metres as uint16 mm, 0 where the accumulated
-    # opacity sum(w) is below 0.5, and that opacity as uint8. Both come from one extra unclamped pass
+    # opacity-normalised expected depth sum(w z) / sum(w) in metres as uint16 mm, 0 where nothing was
+    # rendered, and that opacity as uint8. Both come from one extra unclamped pass
     # rasterizing [1, z, z] as colours over a black background, z the view-space depth of each centre.
     black = torch.zeros(3, dtype=torch.float32, device="cuda")
     for view in tqdm(views, desc="Rendering progress"):
@@ -49,7 +49,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         accumulated = render(view, gaussians, pipeline, black, override_color=torch.stack([torch.ones_like(z), z, z], 1),
                              clamp_output=False)["render"]
         alpha, z_sum = accumulated[0], accumulated[1]
-        expected_depth = torch.where(alpha >= 0.5, z_sum / alpha.clamp(min=1e-3), torch.zeros_like(alpha))
+        expected_depth = torch.where(alpha > 0, z_sum / alpha.clamp(min=1e-6), torch.zeros_like(alpha))
 
         if args.train_test_exp:
             rendering = rendering[..., rendering.shape[-1] // 2:]
