@@ -203,13 +203,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             shape_prior.pose = (R.detach(), t.detach(), c)
             fit_raw, n_fit = object_fit(shape_prior, observed, R, t, c, dataset.object_fit_samples, dataset.object_fit_scale)
             fit_term = dataset.object_fit_weight * fit_raw
+            q = torch.nn.functional.normalize(gaussians.object_pose[:, :4], dim=1)
+            angle = 2 * torch.asin(q[:, 1:].norm(dim=1).clamp(max=1))  # [K] rotation angle [rad]
+            if dataset.object_pose_prior_t > 0:  # the pose stays near the placement unless the evidence insists
+                fit_term = fit_term + 0.5 * (t.norm(dim=1) ** 2).sum() / dataset.object_pose_prior_t ** 2
+            if dataset.object_pose_prior_deg > 0:
+                fit_term = fit_term + 0.5 * (angle ** 2).sum() / (dataset.object_pose_prior_deg * np.pi / 180) ** 2
             loss = loss + fit_term
             if iteration % 100 == 0:
-                q = torch.nn.functional.normalize(gaussians.object_pose[:, :4].detach(), dim=1)
                 pose_log.write(json.dumps(dict(
                     iteration=iteration, fit=float(fit_raw), objects=n_fit,
                     translation_cm=(t.detach().norm(dim=1) * 100).tolist(),
-                    rotation_deg=(2 * torch.acos(q[:, 0].abs().clamp(max=1)) * 180 / np.pi).tolist())) + "\n")
+                    rotation_deg=(angle.detach() * 180 / np.pi).tolist())) + "\n")
                 pose_log.flush()
 
         # ADAM CHANGE: shape loss on the Gaussians owned by a prior object (utils/shape_loss.py)

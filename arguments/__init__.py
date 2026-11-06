@@ -89,6 +89,8 @@ class ModelParams(ParamGroup):
         self.object_fit_weight = 1.0        # weight of the observed-points-to-mesh Huber term
         self.object_fit_samples = 2048      # observed points sampled per object and iteration
         self.object_fit_scale = 0.03        # Huber scale [m]
+        self.object_pose_prior_t = 0.05     # Gaussian prior on the translation [m]: 0.5 |t|^2 / s^2 (0 = none)
+        self.object_pose_prior_deg = 10.0   # Gaussian prior on the rotation angle [deg] (0 = none)
         self.object_pose_evidence = "all"   # all: rendering losses and the fit term move the pose | fit: the fit term only
                                             # | observed: rendering gradients only through the seeds a camera measured
         self.shape_colour_radius = 0.10     # seed colour loss: neighbourhood radius [m]
