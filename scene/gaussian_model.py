@@ -67,6 +67,8 @@ class GaussianModel:
         self.object_of = torch.empty(0, dtype=torch.long)  # [N] pose index per Gaussian, -1 ordinary
         self.object_centre = torch.empty(0, 3)  # [K, 3]
         self.object_pose_lr = 0.0
+        self.object_pose_render_grad = True  # False: the rendering losses do not move the pose (fit term only)
+        self.object_evidence = None  # [N] bool: the seeds whose rendering gradient reaches the pose (observed ones); None = all
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
@@ -93,7 +95,8 @@ class GaussianModel:
                  exposure_optimizer=self.exposure_optimizer.state_dict(),
                  training_state=self.training_state,
                  object_pose=None if self.object_pose is None else self.object_pose.detach(),
-                 object_of=self.object_of, object_centre=self.object_centre, object_pose_lr=self.object_pose_lr),
+                 object_of=self.object_of, object_centre=self.object_centre, object_pose_lr=self.object_pose_lr,
+                 object_evidence=self.object_evidence),
         )
     
     def restore(self, model_args, training_args):
@@ -127,6 +130,8 @@ class GaussianModel:
                 self.object_of = metadata["object_of"].to(self._xyz.device)
                 self.object_centre = metadata["object_centre"].to(self._xyz.device)
                 self.object_pose_lr = metadata["object_pose_lr"]
+                evidence = metadata.get("object_evidence")
+                self.object_evidence = None if evidence is None else evidence.to(self._xyz.device)
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -144,12 +149,22 @@ class GaussianModel:
             return self.rotation_activation(self._rotation)
         m = self.object_of >= 0  # ADAM CHANGE: the object's rotation composed onto the canonical disc orientation
         q = self.rotation_activation(self.object_pose[:, :4])[self.object_of[m]]
+        q = self._evidence_gate(q, m)
         r = self.rotation_activation(self._rotation[m].detach())
         composed = torch.stack([
             q[:, 0] * r[:, 0] - (q[:, 1:] * r[:, 1:]).sum(1),
             *(q[:, 0, None] * r[:, 1:] + r[:, 0, None] * q[:, 1:] + torch.cross(q[:, 1:], r[:, 1:], dim=1)).unbind(1),
         ], 1)
         return self.rotation_activation(self._rotation).index_put((m.nonzero()[:, 0],), composed)
+
+    def _evidence_gate(self, value, m):
+        """Per-seed pose values [M, ...] with the gradient path to the pose cut where rendering may not move it."""
+        if self.object_pose_render_grad and self.object_evidence is None:
+            return value
+        if not self.object_pose_render_grad:
+            return value.detach()
+        keep = self.object_evidence[m].reshape(-1, *([1] * (value.dim() - 1)))
+        return torch.where(keep, value, value.detach())
 
     @property
     def get_xyz(self):
@@ -158,7 +173,8 @@ class GaussianModel:
         R, t, c = self.object_transforms()  # ADAM CHANGE: x = R (p - c) + c + t on the completion Gaussians, p canonical
         m = self.object_of >= 0
         k = self.object_of[m]
-        moved = torch.einsum("nij,nj->ni", R[k], self._xyz[m].detach() - c[k]) + c[k] + t[k]
+        Rk, tk = self._evidence_gate(R[k], m), self._evidence_gate(t[k], m)
+        moved = torch.einsum("nij,nj->ni", Rk, self._xyz[m].detach() - c[k]) + c[k] + tk
         return self._xyz.index_put((m.nonzero()[:, 0],), moved)
 
     def object_transforms(self):
@@ -479,6 +495,8 @@ class GaussianModel:
         self.completion_index = self.completion_index[valid_points_mask]  # ADAM CHANGE
         if len(self.object_of):
             self.object_of = self.object_of[valid_points_mask]
+        if self.object_evidence is not None:
+            self.object_evidence = self.object_evidence[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -525,6 +543,8 @@ class GaussianModel:
         self.completion_index = torch.cat((self.completion_index, new_completion_index))  # ADAM CHANGE
         if len(self.object_of):  # only ordinary Gaussians densify
             self.object_of = torch.cat((self.object_of, torch.full_like(new_completion_index, -1)))
+        if self.object_evidence is not None:
+            self.object_evidence = torch.cat((self.object_evidence, torch.zeros_like(new_completion_index, dtype=torch.bool)))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")

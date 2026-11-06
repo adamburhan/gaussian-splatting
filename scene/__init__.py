@@ -21,10 +21,17 @@ from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
 # ADAM CHANGE: completion Gaussians supplied by the shape prior (positions, normals, colours, object index)
-def read_completion(path):
+def read_completion(path, observed=False):
+    """The completion PLY: its cloud and each sample's object index; observed=True also returns the samples a
+    training camera measured (uint8 property `observed`; all False when the file predates it)."""
     cloud = fetchPly(path)
-    objects = np.asarray(PlyData.read(path)["vertex"]["object"]).astype(np.int64)
-    return cloud, objects
+    vertex = PlyData.read(path)["vertex"]
+    objects = np.asarray(vertex["object"]).astype(np.int64)
+    if not observed:
+        return cloud, objects
+    names = [p.name for p in vertex.properties]
+    seen = np.asarray(vertex["observed"]).astype(bool) if "observed" in names else np.zeros(len(objects), bool)
+    return cloud, objects, seen
 
 class Scene:
 

@@ -70,14 +70,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if dataset.object_pose == "rigid":  # ADAM CHANGE: completion Gaussians as rigid bodies, their pose trained
         if shape_prior is None or not dataset.completion:
             sys.exit("object_pose rigid needs --shape and --completion")
-        cloud, objects = read_completion(dataset.completion)
+        cloud, objects, seen = read_completion(dataset.completion, observed=True)
         names = json.load(open(Path(dataset.completion).with_suffix(".json")))["objects"]
         index = torch.tensor([shape_prior.labels.index(n) if n in shape_prior.labels else -1 for n in names], device="cuda")
         if gaussians.object_pose is None:  # fresh run; a checkpoint restores its own pose
             object_of = torch.full((gaussians.get_xyz.shape[0],), -1, dtype=torch.long, device="cuda")
             completed = gaussians.completed
-            object_of[completed] = index[torch.tensor(objects, device="cuda")[gaussians.completion_index[completed]]]
+            rows = gaussians.completion_index[completed]
+            object_of[completed] = index[torch.tensor(objects, device="cuda")[rows]]
             gaussians.enable_object_pose(object_of, opt.object_pose_lr)
+            if dataset.object_pose_evidence == "observed":
+                if not seen.any():
+                    sys.exit("object_pose_evidence observed needs a completion with observed samples (filters=all)")
+                evidence = torch.zeros(len(object_of), dtype=torch.bool, device="cuda")
+                evidence[completed] = torch.tensor(seen, device="cuda")[rows]
+                gaussians.object_evidence = evidence
+                print(f"object pose evidence: {int(evidence.sum())} observed seeds of {int(completed.sum())}")
+        gaussians.object_pose_render_grad = dataset.object_pose_evidence != "fit"
         observed = [None] * len(shape_prior.labels)
         if dataset.object_observed:
             points, owners = read_completion(dataset.object_observed)
