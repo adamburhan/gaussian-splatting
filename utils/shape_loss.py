@@ -229,7 +229,7 @@ LOSSES = {"centre": centre, "surface": surface, "band": band}
 def object_fit(prior, observed, R, t, c, samples=2048, scale=0.03):
     """The pose's evidence from the visible side: Huber distance of each object's observed points (the map cloud,
     world frame) to its mesh under the pose (R, t, c), differentiable in the pose. Mean over objects with points."""
-    total, count = None, 0
+    total, count, per_object = None, 0, {}
     for k, q in enumerate(observed):
         if q is None or not len(q):
             continue
@@ -237,9 +237,10 @@ def object_fit(prior, observed, R, t, c, samples=2048, scale=0.03):
             q = q[torch.randint(len(q), (samples,), device=q.device)]
         d = prior.sample_grid(k, (q - c[k] - t[k]) @ R[k] + c[k])
         term = torch.where(d < scale, 0.5 * d**2 / scale, d - 0.5 * scale).mean()
+        per_object[k] = term
         total = term if total is None else total + term
         count += 1
-    return (total / count if count else R.sum() * 0.0), count
+    return (total / count if count else R.sum() * 0.0), count, per_object
 
 
 @torch.no_grad()

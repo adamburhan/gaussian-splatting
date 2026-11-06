@@ -201,7 +201,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if observed is not None:
             R, t, c = gaussians.object_transforms()
             shape_prior.pose = (R.detach(), t.detach(), c)
-            fit_raw, n_fit = object_fit(shape_prior, observed, R, t, c, dataset.object_fit_samples, dataset.object_fit_scale)
+            fit_raw, n_fit, fit_per_object = object_fit(shape_prior, observed, R, t, c, dataset.object_fit_samples, dataset.object_fit_scale)
             fit_term = dataset.object_fit_weight * fit_raw
             q = torch.nn.functional.normalize(gaussians.object_pose[:, :4], dim=1)
             angle = 2 * torch.asin(q[:, 1:].norm(dim=1).clamp(max=1))  # [K] rotation angle [rad]
@@ -209,13 +209,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 fit_term = fit_term + 0.5 * (t.norm(dim=1) ** 2).sum() / dataset.object_pose_prior_t ** 2
             if dataset.object_pose_prior_deg > 0:
                 fit_term = fit_term + 0.5 * (angle ** 2).sum() / (dataset.object_pose_prior_deg * np.pi / 180) ** 2
+            render_loss = loss
             loss = loss + fit_term
-            if iteration % 100 == 0:
-                pose_log.write(json.dumps(dict(
-                    iteration=iteration, fit=float(fit_raw), objects=n_fit,
-                    translation_cm=(t.detach().norm(dim=1) * 100).tolist(),
-                    rotation_deg=(angle.detach() * 180 / np.pi).tolist())) + "\n")
-                pose_log.flush()
 
         # ADAM CHANGE: shape loss on the Gaussians owned by a prior object (utils/shape_loss.py)
         shape_term, colour_term = None, None
@@ -236,6 +231,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print(f"\n[ITER {iteration}] shape loss {shape_raw.item():.6f} on {n_shape} Gaussians; owned: "
                       + ", ".join(f"{k} {v}" for k, v in shape_prior.stats().items())
                       + (f"; colour loss {colour_raw.item():.6f} on {n_colour} seeds" if colour_term is not None else ""))
+
+        if observed is not None:  # ADAM CHANGE: pose log, after every term exists
+            if iteration % 100 == 0:
+                entry = dict(
+                    iteration=iteration, fit=float(fit_raw), objects=n_fit,
+                    fit_per_object={int(k): float(v) for k, v in fit_per_object.items()},
+                    translation_cm=(t.detach().norm(dim=1) * 100).tolist(),
+                    rotation_deg=(angle.detach() * 180 / np.pi).tolist())
+                if iteration == 100 or iteration % 1000 == 0:  # gradient paths: which loss reaches the pose, per term
+                    grads = {}
+                    for name, term in (("render", render_loss), ("fit", fit_term), ("surface", shape_term)):
+                        if term is None:
+                            continue
+                        g = torch.autograd.grad(term, gaussians.object_pose, retain_graph=True, allow_unused=True)[0]
+                        grads[name] = None if g is None else g.norm(dim=1).tolist()
+                    entry["pose_grad_norms"] = grads
+                pose_log.write(json.dumps(entry) + "\n")
+                pose_log.flush()
 
         # ADAM CHANGE: gradient policy for the completion Gaussians (see arguments: completion_gradients)
         if dataset.completion_gradients == "shape_only":
