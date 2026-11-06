@@ -83,6 +83,12 @@ class ModelParams(ParamGroup):
         self.shape_delta = 0.02             # band: free distance to the surface [m]
         self.shape_samples = 16             # band: reparameterised draws per Gaussian
         self.shape_colour_weight = 0.0      # seed colour loss: completion DC toward its object's ordinary neighbours' mean; 0 = off
+        # ADAM CHANGE: the completion Gaussians as rigid bodies whose pose trains (needs --completion and --shape)
+        self.object_pose = "none"           # none | rigid: a quaternion and translation per prior object, about its centroid
+        self.object_observed = ""           # PLY of the objects' observed map points (x y z ... object), the pose's visible evidence
+        self.object_fit_weight = 1.0        # weight of the observed-points-to-mesh Huber term
+        self.object_fit_samples = 2048      # observed points sampled per object and iteration
+        self.object_fit_scale = 0.03        # Huber scale [m]
         self.shape_colour_radius = 0.10     # seed colour loss: neighbourhood radius [m]
         self._resolution = -1
         self._white_background = False
@@ -123,6 +129,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
+        self.object_pose_lr = 0.001         # ADAM CHANGE: Adam step of the object pose group (quaternion and metres)
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002

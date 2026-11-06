@@ -21,7 +21,7 @@ from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel, read_completion
 from utils.general_utils import safe_state, get_expon_lr_func
-from utils.shape_loss import ShapePrior, LOSSES, target_mask, seed_colour  # ADAM CHANGE
+from utils.shape_loss import ShapePrior, LOSSES, target_mask, seed_colour, object_fit  # ADAM CHANGE
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -66,6 +66,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
+    observed = None
+    if dataset.object_pose == "rigid":  # ADAM CHANGE: completion Gaussians as rigid bodies, their pose trained
+        if shape_prior is None or not dataset.completion:
+            sys.exit("object_pose rigid needs --shape and --completion")
+        cloud, objects = read_completion(dataset.completion)
+        names = json.load(open(Path(dataset.completion).with_suffix(".json")))["objects"]
+        index = torch.tensor([shape_prior.labels.index(n) if n in shape_prior.labels else -1 for n in names], device="cuda")
+        if gaussians.object_pose is None:  # fresh run; a checkpoint restores its own pose
+            object_of = torch.full((gaussians.get_xyz.shape[0],), -1, dtype=torch.long, device="cuda")
+            completed = gaussians.completed
+            object_of[completed] = index[torch.tensor(objects, device="cuda")[gaussians.completion_index[completed]]]
+            gaussians.enable_object_pose(object_of, opt.object_pose_lr)
+        observed = [None] * len(shape_prior.labels)
+        if dataset.object_observed:
+            points, owners = read_completion(dataset.object_observed)
+            points = torch.tensor(np.asarray(points.points)).float().cuda()
+            owners = index[torch.tensor(owners, device="cuda")]
+            observed = [points[owners == k] for k in range(len(shape_prior.labels))]
+        pose_log = open(os.path.join(dataset.model_path, "object_pose.jsonl"), "a")
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -166,6 +185,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
+
+        # ADAM CHANGE: the object pose: the prior's grids follow the objects (detached: the surface loss does not
+        # pull the pose), the observed points supply the pose's gradient through the fit term
+        fit_term = None
+        if observed is not None:
+            R, t, c = gaussians.object_transforms()
+            shape_prior.pose = (R.detach(), t.detach(), c)
+            fit_raw, n_fit = object_fit(shape_prior, observed, R, t, c, dataset.object_fit_samples, dataset.object_fit_scale)
+            fit_term = dataset.object_fit_weight * fit_raw
+            loss = loss + fit_term
+            if iteration % 100 == 0:
+                q = torch.nn.functional.normalize(gaussians.object_pose[:, :4].detach(), dim=1)
+                pose_log.write(json.dumps(dict(
+                    iteration=iteration, fit=float(fit_raw), objects=n_fit,
+                    translation_cm=(t.detach().norm(dim=1) * 100).tolist(),
+                    rotation_deg=(2 * torch.acos(q[:, 0].abs().clamp(max=1)) * 180 / np.pi).tolist())) + "\n")
+                pose_log.flush()
 
         # ADAM CHANGE: shape loss on the Gaussians owned by a prior object (utils/shape_loss.py)
         shape_term, colour_term = None, None

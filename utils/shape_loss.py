@@ -73,6 +73,20 @@ class ShapePrior:
         self.last_refresh = -1
         self.seeds = None  # per object, its completion samples [M_k, 3] (ownership "unseen")
         self.pairs, self.pairs_key = None, None  # seed_colour's (seed, neighbour) index pairs and the ownership they match
+        self.pose = None  # (R [K, 3, 3], t [K, 3], c [K, 3]) when the objects are rigid bodies (train.py object_pose)
+
+    def canonical(self, k, xyz):
+        """World points into object k's grid frame under the current pose: p = R^T (x - c - t) + c."""
+        if self.pose is None:
+            return xyz
+        R, t, c = self.pose
+        return (xyz - c[k] - t[k]) @ R[k] + c[k]
+
+    def to_world(self, k, xyz):
+        if self.pose is None:
+            return xyz
+        R, t, c = self.pose
+        return (xyz - c[k]) @ R[k].T + c[k] + t[k]
 
     def set_seeds(self, xyz, owner, names):
         """Completion samples [M, 3] and their object index [M] into `names` (the completion PLY numbers the
@@ -97,7 +111,7 @@ class ShapePrior:
     @torch.no_grad()
     def distances(self, xyz):
         """[N, K] distance to every object's surface."""
-        return torch.stack([self.sample_grid(k, xyz) for k in range(len(self.grids))], 1)
+        return torch.stack([self.sample_grid(k, self.canonical(k, xyz)) for k in range(len(self.grids))], 1)
 
     @torch.no_grad()
     def seed_distance(self, xyz, owner):
@@ -106,6 +120,7 @@ class ShapePrior:
         for k, seeds in enumerate(self.seeds):
             m = (owner == k).nonzero()[:, 0]
             if len(m) and len(seeds):
+                seeds = self.to_world(k, seeds)
                 d[m] = torch.cat([torch.cdist(xyz[i], seeds).min(1).values for i in m.split(max(1, CDIST_BLOCK // len(seeds)))])
         return d
 
@@ -131,7 +146,7 @@ class ShapePrior:
         for k in range(len(self.grids)):
             m = owner == k
             if m.any():
-                d = d.index_put((m.nonzero()[:, 0],), self.sample_grid(k, xyz[m]))
+                d = d.index_put((m.nonzero()[:, 0],), self.sample_grid(k, self.canonical(k, xyz[m])))
         return d
 
     @torch.no_grad()
@@ -142,10 +157,11 @@ class ShapePrior:
             m = owner == k
             if m.any():
                 h = self.grids[k][1]
-                x = xyz[m]
+                x = self.canonical(k, xyz[m])
                 g = torch.stack([self.sample_grid(k, x + h * e, signed=True) - self.sample_grid(k, x - h * e, signed=True)
                                  for e in torch.eye(3, device=xyz.device, dtype=xyz.dtype)], 1)
-                n[m] = g / g.norm(dim=1, keepdim=True).clamp_min(1e-9)
+                g = g / g.norm(dim=1, keepdim=True).clamp_min(1e-9)
+                n[m] = g if self.pose is None else g @ self.pose[0][k].T
         return n
 
     def stats(self):
@@ -208,6 +224,22 @@ def band(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="non
 
 
 LOSSES = {"centre": centre, "surface": surface, "band": band}
+
+
+def object_fit(prior, observed, R, t, c, samples=2048, scale=0.03):
+    """The pose's evidence from the visible side: Huber distance of each object's observed points (the map cloud,
+    world frame) to its mesh under the pose (R, t, c), differentiable in the pose. Mean over objects with points."""
+    total, count = None, 0
+    for k, q in enumerate(observed):
+        if q is None or not len(q):
+            continue
+        if len(q) > samples:
+            q = q[torch.randint(len(q), (samples,), device=q.device)]
+        d = prior.sample_grid(k, (q - c[k] - t[k]) @ R[k] + c[k])
+        term = torch.where(d < scale, 0.5 * d**2 / scale, d - 0.5 * scale).mean()
+        total = term if total is None else total + term
+        count += 1
+    return (total / count if count else R.sum() * 0.0), count
 
 
 @torch.no_grad()
