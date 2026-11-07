@@ -108,6 +108,8 @@ class Scene:
             
             # ADAM CHANGE: completion Gaussians appended to the init cloud
             completion, completion_objects = read_completion(args.completion) if args.completion else (None, None)
+            if completion is not None and not len(completion_objects):  # an empty prior (every object rejected at seeding)
+                completion, completion_objects = None, None
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent,
                                            completion=completion, completion_opacity=args.completion_opacity,
                                            completion_thickness=args.completion_thickness, completion_objects=completion_objects)

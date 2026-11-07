@@ -55,8 +55,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    has_objects = bool(dataset.shape) and json.load(open(os.path.join(dataset.shape, "objects.json")))["objects"]
     shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh, ownership=dataset.shape_ownership,
-                             radius_scale=dataset.shape_radius_scale) if dataset.shape else None  # ADAM CHANGE
+                             radius_scale=dataset.shape_radius_scale) if has_objects else None  # ADAM CHANGE: an empty prior trains as the control
     if shape_prior is not None and dataset.shape_ownership == "unseen":  # ADAM CHANGE: the completion samples are the unseen surface
         if not dataset.completion:
             sys.exit("shape_ownership unseen needs --completion")
@@ -67,8 +68,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
     observed = None
-    if dataset.object_pose == "rigid":  # ADAM CHANGE: completion Gaussians as rigid bodies, their pose trained
-        if shape_prior is None or not dataset.completion:
+    if dataset.object_pose == "rigid" and shape_prior is not None and gaussians.completed.any():  # ADAM CHANGE: rigid bodies
+        if not dataset.completion:
             sys.exit("object_pose rigid needs --shape and --completion")
         cloud, objects, seen = read_completion(dataset.completion, observed=True)
         names = json.load(open(Path(dataset.completion).with_suffix(".json")))["objects"]
