@@ -59,6 +59,8 @@ class GaussianModel:
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.completion_index = torch.empty(0, dtype=torch.long)  # ADAM CHANGE: see create_from_pcd; empty when there is no completion
+        self.instance_id = torch.empty(0, dtype=torch.long)  # fixed semantic identity, distinct from seed provenance / pose
+        self.completion_policy = "legacy"
         self.training_state = {}  # ADAM CHANGE: train.py's resume state, carried by the checkpoint
         # ADAM CHANGE: rigid object pose of the completion Gaussians (enable_object_pose): per prior object a quaternion
         # and a translation about the object's centre. The completed Gaussians' stored xyz/rotation stay canonical and
@@ -90,7 +92,7 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
-            dict(completion_index=self.completion_index,  # ADAM CHANGE: identities, exposure and resume state
+            dict(instance_id=self.instance_id, completion_policy=self.completion_policy, completion_index=self.completion_index,  # ADAM CHANGE: identities, exposure and resume state
                  exposure=self._exposure, exposure_mapping=self.exposure_mapping,
                  exposure_optimizer=self.exposure_optimizer.state_dict(),
                  training_state=self.training_state,
@@ -121,6 +123,12 @@ class GaussianModel:
                                  torch.full((len(self._xyz),), -1, dtype=torch.long, device=self._xyz.device))
         if len(self.completion_index) != len(self._xyz):
             raise ValueError("Checkpoint completion identities do not match its Gaussians")
+        self.instance_id = (metadata.get("instance_id", torch.full_like(self.completion_index, -1)).to(self._xyz.device)
+                            if metadata else torch.full_like(self.completion_index, -1))
+        if metadata and metadata.get("completion_policy", "legacy") != self.completion_policy:
+            raise ValueError("checkpoint completion policy differs from the requested policy")
+        if len(self.instance_id) != len(self._xyz):
+            raise ValueError("checkpoint instance identities do not match its Gaussians")
         if metadata is not None:
             self._exposure = nn.Parameter(metadata["exposure"].to(self._xyz.device))
             self.exposure_mapping = metadata["exposure_mapping"]
@@ -285,6 +293,7 @@ class GaussianModel:
         opacities = self.inverse_opacity_activation(opacities)
         # ADAM CHANGE: row of the completion PLY each Gaussian came from, -1 for ordinary ones
         self.completion_index = torch.full((fused_point_cloud.shape[0],), -1, dtype=torch.long, device="cuda")
+        self.instance_id = torch.full_like(self.completion_index, -1)
         if n:
             self.completion_index[-n:] = torch.arange(n, device="cuda")
 
@@ -375,18 +384,21 @@ class GaussianModel:
         scale = self._scaling.detach().cpu().numpy()
         rotation = (self.get_rotation if self.object_pose is not None else self._rotation).detach().cpu().numpy()  # ADAM CHANGE
 
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()] + [('instance_id', 'i4')]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
-        elements[:] = list(map(tuple, attributes))
+        for i, name in enumerate(self.construct_list_of_attributes()):
+            elements[name] = attributes[:, i]
+        elements["instance_id"] = self.instance_id.cpu().numpy() if len(self.instance_id) else -1
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
     def reset_opacity(self):
         opacities_new = torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01)
         # ADAM CHANGE: completion Gaussians keep their opacity; no training pixel could raise them back after a reset
-        opacities_new = torch.where(self.completed[:, None], self.get_opacity, opacities_new)
+        if self.completion_policy == "legacy":
+            opacities_new = torch.where(self.completed[:, None], self.get_opacity, opacities_new)
         opacities_new = self.inverse_opacity_activation(opacities_new)
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
@@ -408,6 +420,8 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        ids = np.asarray(plydata.elements[0]["instance_id"]) if "instance_id" in plydata.elements[0].data.dtype.names else np.full(len(xyz), -1)
+        self.instance_id = torch.as_tensor(ids.astype(np.int64), device="cuda")
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -494,6 +508,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        self.instance_id = self.instance_id[valid_points_mask]
         self.completion_index = self.completion_index[valid_points_mask]  # ADAM CHANGE
         if len(self.object_of):
             self.object_of = self.object_of[valid_points_mask]
@@ -525,7 +540,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_completion_index):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_completion_index, new_instance_id):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -542,6 +557,7 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
+        self.instance_id = torch.cat((self.instance_id, new_instance_id))
         self.completion_index = torch.cat((self.completion_index, new_completion_index))  # ADAM CHANGE
         if len(self.object_of):  # only ordinary Gaussians densify
             self.object_of = torch.cat((self.object_of, torch.full_like(new_completion_index, -1)))
@@ -573,7 +589,7 @@ class GaussianModel:
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
         new_completion_index = self.completion_index[selected_pts_mask].repeat(N)  # ADAM CHANGE
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii, new_completion_index)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii, new_completion_index, self.instance_id[selected_pts_mask].repeat(N))
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -594,7 +610,7 @@ class GaussianModel:
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
         new_completion_index = self.completion_index[selected_pts_mask]  # ADAM CHANGE
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_completion_index)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_completion_index, self.instance_id[selected_pts_mask])
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
@@ -616,7 +632,7 @@ class GaussianModel:
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        if self.completion_index.numel():  # ADAM CHANGE: completion Gaussians accumulate no view-space gradient, so they never clone or split
+        if self.completion_policy == "legacy" and self.completion_index.numel():  # legacy seeds do not densify
             # (radii > 0).nonzero() is an index tensor [M, 1], not a boolean mask: filter the indices. The guard is for load_ply
             # models, where completion_index is empty; after create_from_pcd it always has one entry per Gaussian
             idx = update_filter.reshape(-1)
