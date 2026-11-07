@@ -78,6 +78,8 @@ class ModelParams(ParamGroup):
         self.shape_robust_scale = 0.03      # huber: quadratic within this distance [m], linear beyond
         self.shape_ownership = "surface"    # surface: any surface within radius | unseen: also within radius of the object's completion samples
         self.shape_refresh = 100            # iterations between ownership updates
+        self.shape_backend = "grid"        # grid (legacy) | mesh (direct triangle queries)
+        self.shape_ownership_file = ""     # samples for constraints-only; independent of --completion
         self.shape_spread = 1.0             # surface: weight of the variance-along-the-normal term
         self.shape_tolerance = 0.005        # surface: free thickness [m]
         self.shape_delta = 0.02             # band: free distance to the surface [m]

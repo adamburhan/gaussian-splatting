@@ -19,6 +19,7 @@ from scene.dataset_readers import sceneLoadTypeCallbacks, fetchPly
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from utils.completion import seed_weights
 
 # ADAM CHANGE: completion Gaussians supplied by the shape prior (positions, normals, colours, object index)
 def read_completion(path, observed=False):
@@ -112,7 +113,8 @@ class Scene:
                 completion, completion_objects = None, None
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent,
                                            completion=completion, completion_opacity=args.completion_opacity,
-                                           completion_thickness=args.completion_thickness, completion_objects=completion_objects)
+                                           completion_thickness=args.completion_thickness, completion_objects=completion_objects,
+                                           completion_weights=seed_weights(args.completion) if completion is not None else None)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

@@ -57,13 +57,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.training_setup(opt)
     has_objects = bool(dataset.shape) and json.load(open(os.path.join(dataset.shape, "objects.json")))["objects"]
     shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh, ownership=dataset.shape_ownership,
-                             radius_scale=dataset.shape_radius_scale) if has_objects else None  # ADAM CHANGE: an empty prior trains as the control
+                             radius_scale=dataset.shape_radius_scale, backend=dataset.shape_backend) if has_objects else None
     if shape_prior is not None and dataset.shape_ownership == "unseen":  # ADAM CHANGE: the completion samples are the unseen surface
-        if not dataset.completion:
-            sys.exit("shape_ownership unseen needs --completion")
-        cloud, objects = read_completion(dataset.completion)
-        names = json.load(open(Path(dataset.completion).with_suffix(".json")))["objects"]
-        shape_prior.set_seeds(torch.tensor(np.asarray(cloud.points)).float().cuda(), torch.tensor(objects).cuda(), names)
+        shape_prior.load_ownership(dataset.shape_ownership_file or dataset.completion)
+    if shape_prior is not None and dataset.shape_ownership == "evidence" and dataset.object_pose != "none":
+        raise ValueError("prepared evidence is tied to a fixed pose; re-inspect after moving the hypothesis")
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)

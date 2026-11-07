@@ -247,7 +247,8 @@ class GaussianModel:
         completion=None,
         completion_opacity=0.9,
         completion_thickness=0.002,
-        completion_objects=None
+        completion_objects=None,
+        completion_weights=None
     ):
         self.spatial_lr_scale = spatial_lr_scale
         
@@ -278,8 +279,9 @@ class GaussianModel:
 
 
         opacities = 0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
-        if n:  # ADAM CHANGE: completion starts opaque; no training pixel would raise it from 0.1
-            opacities[-n:] = completion_opacity
+        if n:  # fixed prior weights scale the seed opacity; legacy files have unit weight
+            weights = torch.ones(n, device="cuda") if completion_weights is None else torch.as_tensor(completion_weights, device="cuda")
+            opacities[-n:] = completion_opacity * weights[:, None]
         opacities = self.inverse_opacity_activation(opacities)
         # ADAM CHANGE: row of the completion PLY each Gaussian came from, -1 for ordinary ones
         self.completion_index = torch.full((fused_point_cloud.shape[0],), -1, dtype=torch.long, device="cuda")
