@@ -15,28 +15,6 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
-def render_compatibility(camera, pc, pipe, members, target_depth, target_sigma):
-    """Object-only transmittance; fixed depth targets, no appearance parameters.
-
-    The scalar output is sum(T_i alpha_i exp(-.5*((z_i-d)/sigma)^2)).
-    It is not normalized by opacity and not a kernel of expected depth.
-    """
-    xyz = pc.get_xyz[members]
-    if not len(xyz):
-        return torch.zeros_like(target_depth) + xyz.sum() * 0
-    settings = GaussianRasterizationSettings(
-        image_height=camera.image_height, image_width=camera.image_width,
-        tanfovx=math.tan(camera.FoVx/2), tanfovy=math.tan(camera.FoVy/2),
-        bg=xyz.new_zeros(3), scale_modifier=1.,
-        viewmatrix=camera.world_view_transform, projmatrix=camera.full_proj_transform,
-        sh_degree=0, campos=camera.camera_center, prefiltered=False,
-        debug=pipe.debug, antialiasing=pipe.antialiasing,
-        target_depth=target_depth, target_sigma=target_sigma)
-    _, _, compatibility = GaussianRasterizer(settings)(
-        means3D=xyz, means2D=torch.zeros_like(xyz), colors_precomp=torch.zeros_like(xyz),
-        opacities=pc.get_opacity[members], scales=pc.get_scaling[members], rotations=pc.get_rotation[members])
-    return compatibility
-
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False, clamp_output=True):
     """
     Render the scene. 

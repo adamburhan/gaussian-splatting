@@ -1,8 +1,4 @@
-"""Gaussian-to-surface penalties in squared metres.
-
-Ownership and evidence live in shape_prior; geometry queries live in surfaces.
-The surface loss is a local tangent approximation, not rendered-surface agreement.
-"""
+"""Constrain Gaussians with distance grids; test with pytest tests/test_shape_loss.py."""
 
 import torch
 
@@ -44,7 +40,7 @@ def centre(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="n
     if not m.any():
         return _zero(xyz)
     d = prior.distance(xyz[m], owner[m])
-    return (prior.weight(xyz[m], owner[m]) * _weights(opacity, m, opacity_weight) * _penalty(d, robust, robust_scale)).mean(), int(m.sum())
+    return (_weights(opacity, m, opacity_weight) * _penalty(d, robust, robust_scale)).mean(), int(m.sum())
 
 
 def surface(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", spread=1.0, tolerance=0.005,
@@ -57,7 +53,7 @@ def surface(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="
     v = (quaternion_to_matrix(rotation[m]).transpose(1, 2) @ n[..., None])[..., 0]  # normal in the Gaussian's frame
     variance = (scaling[m] ** 2 * v ** 2).sum(1)  # n^T R S^2 R^T n
     penalty = _penalty(d, robust, robust_scale) + spread * torch.relu(variance - tolerance ** 2)
-    return (prior.weight(xyz[m], owner[m]) * _weights(opacity, m, opacity_weight) * penalty).mean(), int(m.sum())
+    return (_weights(opacity, m, opacity_weight) * penalty).mean(), int(m.sum())
 
 
 def band(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="none", delta=0.02, samples=16, **_):
@@ -68,7 +64,7 @@ def band(prior, xyz, scaling, rotation, owner, opacity=None, opacity_weight="non
     eps = torch.randn(samples, int(m.sum()), 3, device=xyz.device, dtype=xyz.dtype)
     X = xyz[m] + (R @ (scaling[m] * eps)[..., None])[..., 0]  # [S, M, 3]
     d = prior.distance(X.reshape(-1, 3), owner[m].repeat(samples)).reshape(samples, -1)
-    return (prior.weight(xyz[m], owner[m]) * _weights(opacity, m, opacity_weight) * (torch.relu(d - delta) ** 2).mean(0)).mean(), int(m.sum())
+    return (_weights(opacity, m, opacity_weight) * (torch.relu(d - delta) ** 2).mean(0)).mean(), int(m.sum())
 
 
 LOSSES = {"centre": centre, "surface": surface, "band": band}

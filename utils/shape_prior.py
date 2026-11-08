@@ -1,4 +1,4 @@
-"""Surface ownership and optional fixed support; independent of Gaussian seeding."""
+"""Assign Gaussians to distance-grid priors; test with pytest tests/test_shape_loss.py."""
 
 import json
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from utils.surfaces import load_surface
+from utils.surfaces import GridSurface
 
 CDIST_BLOCK = 2**24
 
@@ -20,26 +20,17 @@ class ShapePrior:
         device="cuda",
         ownership="surface",
         radius_scale=0.0,
-        backend="grid",
     ):
         self.path = Path(path)
         meta = json.loads((self.path / "objects.json").read_text())
         self.labels = [o["label"] for o in meta["objects"]]
         self.refresh, self.device, self.ownership = refresh, device, ownership
-        if ownership not in ("surface", "unseen", "evidence"):
+        if ownership not in ("surface", "unseen"):
             raise ValueError(f"unknown ownership: {ownership}")
         self.surfaces = [
-            load_surface(self.path, o, backend, float(meta.get("dilate", 0.3)), device)
+            GridSurface(self.path / o["distance"], float(meta.get("dilate", 0.3)), device)
             for o in meta["objects"]
         ]
-        self.support = (
-            [
-                SurfaceSupport(self.path / o["support"], meta["support_radius"])
-                for o in meta["objects"]
-            ]
-            if ownership == "evidence"
-            else None
-        )
         self.radius = torch.tensor(
             [max(radius, radius_scale * s.diagonal) for s in self.surfaces],
             device=device,
@@ -126,13 +117,6 @@ class ShapePrior:
     @torch.no_grad()
     def assign(self, xyz):
         distances = self.distances(xyz)
-        if self.support is not None:
-            for j, surface in enumerate(self.surfaces):
-                x = self.canonical(j, xyz)
-                distances[:, j].masked_fill_(
-                    self.support[j].weight(surface.closest(x), surface.normal(x)) <= 0,
-                    float("inf"),
-                )
         d, k = distances.min(1)
         radius = self.radius[k]
         owner = torch.where(d < radius, k, torch.full_like(k, -1))
@@ -167,7 +151,7 @@ class ShapePrior:
 
     @torch.no_grad()
     def normal(self, xyz, owner):
-        """Detached unit normals from the selected surface backend."""
+        """Detached unit normals from the distance grid."""
         n = torch.zeros_like(xyz)
         for k in range(len(self.surfaces)):
             m = owner == k
@@ -175,21 +159,6 @@ class ShapePrior:
                 g = self.surfaces[k].normal(self.canonical(k, xyz[m]))
                 n[m] = g if self.pose is None else g @ self.pose[0][k].T
         return n
-
-    @torch.no_grad()
-    def weight(self, xyz, owner):
-        """Fixed evidence weights; never normalize by their sum."""
-        if self.support is None:
-            return torch.ones(len(xyz), device=xyz.device, dtype=xyz.dtype)
-        weights = torch.zeros(len(xyz), device=xyz.device, dtype=xyz.dtype)
-        for k, surface in enumerate(self.surfaces):
-            m = owner == k
-            if m.any():
-                x = self.canonical(k, xyz[m])
-                weights[m] = self.support[k].weight(
-                    surface.closest(x), surface.normal(x)
-                )
-        return weights
 
     def stats(self):
         """Owned Gaussians per object."""
@@ -199,38 +168,3 @@ class ShapePrior:
             else torch.zeros(len(self.labels))
         )
         return dict(zip(self.labels, counts.tolist()))
-
-
-class SurfaceSupport:
-    """Nearest-sample influence on the surface, including zero-weight samples.
-
-    Keeping rejected samples prevents querying only the nearest accepted patch.
-    Resolution is set by preparation sampling, not by a distance volume.
-    """
-
-    def __init__(self, path, radius):
-        from scipy.spatial import cKDTree
-
-        with np.load(path) as data:
-            self.tree = cKDTree(data["points"])
-            self.weights = data["weight"].astype(np.float32)
-            self.normals = data["normals"] if "normals" in data else None
-        if (
-            not np.isfinite(self.weights).all()
-            or ((self.weights < 0) | (self.weights > 1)).any()
-        ):
-            raise ValueError(f"invalid support weights: {path}")
-        self.radius = radius
-
-    def weight(self, projected, normal=None):
-        d, index = self.tree.query(projected.detach().cpu().numpy())
-        w = np.zeros(len(projected), np.float32)
-        valid = d <= self.radius
-        if self.normals is not None and normal is not None:
-            # Avoid borrowing support from the opposite side of a thin surface.
-            ids = np.flatnonzero(valid)
-            valid[ids] &= (
-                self.normals[index[ids]] * normal.detach().cpu().numpy()[ids]
-            ).sum(1) > 0
-        w[valid] = self.weights[index[valid]]
-        return torch.as_tensor(w, device=projected.device, dtype=projected.dtype)

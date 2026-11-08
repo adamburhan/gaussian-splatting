@@ -60,7 +60,6 @@ class ModelParams(ParamGroup):
         self.depth_unit = "encoded"
         # ADAM CHANGE: completion Gaussians from the shape prior (a PLY with x y z nx ny nz red green blue object)
         self.completion = ""                # path; empty = none
-        self.completion_policy = "legacy"  # legacy | ordinary: reset and densify seeds like observed Gaussians
         self.completion_opacity = 0.9       # initial opacity (ordinary init points get 0.1)
         self.completion_thickness = 0.002    # scale along the normal [m]: a disc on the surface
         # ADAM CHANGE: which gradients the completion Gaussians receive. all: trained like any Gaussian;
@@ -69,9 +68,6 @@ class ModelParams(ParamGroup):
         # them; without a shape loss this is the fully frozen arm
         self.completion_gradients = "colour_frozen"
         # ADAM CHANGE: shape losses (utils/shape_loss.py) on the Gaussians near the prior's object surfaces
-        self.probe_cache = ""  # prepared fixed cameras, targets, confidence, uncertainty
-        self.probe_association_radius = 0.03
-        self.probe_association_margin = 0.01
         self.shape = ""                     # prior directory (objects.json + distance/<label>.npz); empty = none
         self.shape_loss = "centre"          # centre | surface | band
         self.shape_targets = "ordinary"     # which Gaussians the loss may act on: ordinary | completion | all
@@ -82,7 +78,6 @@ class ModelParams(ParamGroup):
         self.shape_robust_scale = 0.03      # huber: quadratic within this distance [m], linear beyond
         self.shape_ownership = "surface"    # surface: any surface within radius | unseen: also within radius of the object's completion samples
         self.shape_refresh = 100            # iterations between ownership updates
-        self.shape_backend = "grid"        # grid (legacy) | mesh (direct triangle queries)
         self.shape_ownership_file = ""     # samples for constraints-only; independent of --completion
         self.shape_spread = 1.0             # surface: weight of the variance-along-the-normal term
         self.shape_tolerance = 0.005        # surface: free thickness [m]

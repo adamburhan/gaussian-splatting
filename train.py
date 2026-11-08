@@ -21,7 +21,6 @@ from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel, read_completion
 from utils.general_utils import safe_state, get_expon_lr_func
-from utils.probe_prior import ProbePrior
 from utils.shape_loss import ShapePrior, LOSSES, target_mask, seed_colour, object_fit  # ADAM CHANGE
 import uuid
 from tqdm import tqdm
@@ -54,31 +53,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    if dataset.completion_policy not in ("legacy", "ordinary"):
-        raise ValueError("completion_policy must be legacy or ordinary")
-    if dataset.completion_policy == "ordinary" and dataset.object_pose != "none":
-        raise ValueError("ordinary seed densification currently requires fixed object pose")
-    rendered_prior = dataset.shape_loss == "rendered" and bool(dataset.shape)
-    if rendered_prior and (not dataset.probe_cache or dataset.object_pose != "none"
-                           or dataset.completion_gradients != "all" or opt.optimizer_type != "default"):
-        raise ValueError("rendered prior requires a cache, fixed pose, all gradients and dense Adam")
-    gaussians.completion_policy = dataset.completion_policy
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
-    has_objects = not rendered_prior and bool(dataset.shape) and json.load(open(os.path.join(dataset.shape, "objects.json")))["objects"]
+    has_objects = bool(dataset.shape) and json.load(open(os.path.join(dataset.shape, "objects.json")))["objects"]
     shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh, ownership=dataset.shape_ownership,
-                             radius_scale=dataset.shape_radius_scale, backend=dataset.shape_backend) if has_objects else None
+                             radius_scale=dataset.shape_radius_scale) if has_objects else None
     if shape_prior is not None and dataset.shape_ownership == "unseen":  # ADAM CHANGE: the completion samples are the unseen surface
         shape_prior.load_ownership(dataset.shape_ownership_file or dataset.completion)
-    if shape_prior is not None and dataset.shape_ownership == "evidence" and dataset.object_pose != "none":
-        raise ValueError("prepared evidence is tied to a fixed pose; re-inspect after moving the hypothesis")
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
-    probe_prior = ProbePrior(dataset.probe_cache) if rendered_prior else None
-    if probe_prior is not None:
-        probe_prior.initialize_identity(gaussians, dataset.completion,
-                                        dataset.probe_association_radius, dataset.probe_association_margin)
     observed = None
     if dataset.object_pose == "rigid" and shape_prior is not None and gaussians.completed.any():  # ADAM CHANGE: rigid bodies
         if not dataset.completion:
@@ -245,13 +229,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                       + ", ".join(f"{k} {v}" for k, v in shape_prior.stats().items())
                       + (f"; colour loss {colour_raw.item():.6f} on {n_colour} seeds" if colour_term is not None else ""))
 
-        if probe_prior is not None and opt.shape_weight > 0:
-            shape_raw = probe_prior.loss(gaussians, pipe, iteration)
-            shape_term = opt.shape_weight * shape_raw
-            if iteration % 1000 == 0:
-                print(f"\n[ITER {iteration}] rendered prior {shape_raw.item():.6f}; "
-                      f"seeds {int(gaussians.completed.sum())}")
-
         if observed is not None:  # ADAM CHANGE: pose log, after every term exists
             if iteration % 100 == 0:
                 entry = dict(
@@ -337,8 +314,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     viewpoint_indices=viewpoint_indices, python_rng=random.getstate(),
                     numpy_rng=np.random.get_state(), torch_rng=torch.get_rng_state(),
                     cuda_rng=torch.cuda.get_rng_state_all())
-                if probe_prior is not None:
-                    gaussians.training_state["probe_fingerprint"] = probe_prior.fingerprint
                 if shape_prior is not None:
                     gaussians.training_state.update(shape_labels=shape_prior.labels, shape_owner=shape_prior.owner,
                                                     shape_last_refresh=shape_prior.last_refresh)
