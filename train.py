@@ -22,6 +22,7 @@ import sys
 from scene import Scene, GaussianModel, read_completion
 from utils.general_utils import safe_state, get_expon_lr_func
 from utils.shape_loss import ShapePrior, LOSSES, target_mask, seed_colour, object_fit  # ADAM CHANGE
+from utils.density_prior import DensityPrior
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -55,6 +56,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    if dataset.density_prior and (dataset.shape or dataset.object_pose != "none"):
+        raise ValueError("density and grid/pose constraints are separate experiment arms")
+    density_prior = DensityPrior(dataset.density_prior, "cuda", dataset.density_weight,
+                                 dataset.density_samples, os.path.join(dataset.model_path, "density_loss.jsonl")) if dataset.density_prior else None
     has_objects = bool(dataset.shape) and json.load(open(os.path.join(dataset.shape, "objects.json")))["objects"]
     shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh, ownership=dataset.shape_ownership,
                              radius_scale=dataset.shape_radius_scale) if has_objects else None
@@ -247,6 +252,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 pose_log.write(json.dumps(entry) + "\n")
                 pose_log.flush()
 
+        if density_prior is not None:
+            shape_term = density_prior.loss(gaussians, iteration)
+
         # ADAM CHANGE: gradient policy for the completion Gaussians (see arguments: completion_gradients)
         if dataset.completion_gradients == "shape_only":
             loss.backward()  # observation losses only; the shape term is a separate graph on the parameters
@@ -290,7 +298,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                    gaussians.reset_opacity(reset_seeds=dataset.reset_seed_opacity)
 
             # Optimizer step
             if iteration < opt.iterations:

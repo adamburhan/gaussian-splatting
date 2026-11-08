@@ -383,10 +383,11 @@ class GaussianModel:
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
-    def reset_opacity(self):
+    def reset_opacity(self, reset_seeds=False):
         opacities_new = torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01)
-        # ADAM CHANGE: completion Gaussians keep their opacity; no training pixel could raise them back after a reset
-        opacities_new = torch.where(self.completed[:, None], self.get_opacity, opacities_new)
+        # Keep the historical seed policy unless the arm explicitly resets seeds.
+        if not reset_seeds:
+            opacities_new = torch.where(self.completed[:, None], self.get_opacity, opacities_new)
         opacities_new = self.inverse_opacity_activation(opacities_new)
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]

@@ -60,6 +60,10 @@ class ModelParams(ParamGroup):
         self.depth_unit = "encoded"
         # ADAM CHANGE: completion Gaussians from the shape prior (a PLY with x y z nx ny nz red green blue object)
         self.completion = ""                # path; empty = none
+        self.reset_seed_opacity = False
+        self.density_prior = ""
+        self.density_weight = 0.1
+        self.density_samples = 8
         self.completion_opacity = 0.9       # initial opacity (ordinary init points get 0.1)
         self.completion_thickness = 0.002    # scale along the normal [m]: a disc on the surface
         # ADAM CHANGE: which gradients the completion Gaussians receive. all: trained like any Gaussian;

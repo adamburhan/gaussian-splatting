@@ -37,23 +37,25 @@ def gaussian_density(points, means, scales, quaternions, opacity, chunk=32768):
 
 
 class DensityPrior:
-    def __init__(self, config_file, device):
+    def __init__(self, config_file, device, weight, samples, log):
         self.cfg = json.loads(Path(config_file).read_text())
-        cache = Path(self.cfg["cache"])
+        cache = Path(config_file).parent / self.cfg["cache"]
         if hashlib.sha256(cache.read_bytes()).hexdigest() != self.cfg["cache_sha256"]:
             raise ValueError("Density cache fingerprint mismatch")
         data = np.load(cache)
         self.points, self.target, self.confidence = [
             torch.as_tensor(data[k], device=device, dtype=torch.float32)
             for k in ("points", "target", "confidence")]
-        self.batch = self.cfg["surface_samples_per_step"]
-        self.weight = self.cfg["weight"]
-        self.log = Path(self.cfg["log"])
+        self.batch = samples
+        self.weight = weight
+        self.log = Path(log)
         assert self.points.shape[:-1] == self.target.shape == self.confidence.shape
         assert all(torch.isfinite(t).all() for t in (self.points, self.target, self.confidence))
         assert ((self.confidence >= 0) & (self.confidence <= 1)).all()
 
     def loss(self, gaussians, iteration):
+        if not len(self.points):
+            return gaussians.get_xyz.sum() * 0
         indices = (torch.arange(self.batch, device=self.points.device)
                    + (iteration - 1) * self.batch) % len(self.points)
         points = self.points[indices].reshape(-1, 3)
