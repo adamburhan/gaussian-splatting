@@ -37,7 +37,7 @@ def gaussian_density(points, means, scales, quaternions, opacity, chunk=32768):
     return value
 
 
-RADII = (0.03, 0.06, 0.125, 0.25, 0.5)  # voxel sizes [m] of the culling tiers; Gaussians larger than the last are summed densely
+SIGMAS = 3.5  # a Gaussian is ignored at a point beyond this many of its scales: it adds less than exp(-SIGMAS^2 / 2)
 
 
 def pair_density(points, means, rotations, scales, opacity, p, g):
@@ -46,46 +46,38 @@ def pair_density(points, means, rotations, scales, opacity, p, g):
     return torch.zeros(len(points), dtype=points.dtype, device=points.device).index_add(0, p, exponent.exp() * opacity.reshape(-1)[g])
 
 
-def culled_density(points, means, scales, quaternions, opacity, sigmas=3.5, chunk=2_000_000):
-    """gaussian_density restricted to the Gaussians whose centre lies within `sigmas` of their largest scale from the
-    point: a Gaussian is binned by its extent into a voxel tier of size >= sigmas * max scale, and a point gathers
-    the 27 cells around it in every tier, so every dropped Gaussian contributes less than exp(-sigmas^2 / 2)."""
-    extent = sigmas * scales.detach().max(-1).values
-    tier = torch.bucketize(extent, torch.tensor(RADII, device=extent.device), right=False)  # RADII[tier] >= extent
-    value = points.new_zeros(len(points))
-    dense = tier >= len(RADII)
-    if dense.any():
-        value = value + gaussian_density(points, means[dense], scales[dense], quaternions[dense], opacity[dense])
+def near_pairs(points, means, rotations, scales, sigmas, block):
+    """The (point, Gaussian) pairs that can contribute: the point lies within `sigmas` of the Gaussian's largest scale
+    from its centre and within `sigmas` of its smallest scale from its plane. Two dense tests without gradients; every
+    pair inside the `sigmas` ellipsoid passes both."""
+    with torch.no_grad():
+        normal = rotations[torch.arange(len(means), device=means.device), :, scales.argmin(-1)]
+        reach, thin = sigmas * scales.max(-1).values, sigmas * scales.min(-1).values
+        origin = points.mean(0)  # centred coordinates keep the products exact enough in float32
+        x, m = points - origin, means - origin
+        height = (m * normal).sum(-1)
+        p, g = [], []
+        step = max(1, block // max(len(m), 1))
+        for start in range(0, len(x), step):
+            chunk = x[start:start + step]
+            near = (torch.cdist(chunk, m) <= reach) & ((chunk @ normal.T - height).abs() <= thin)
+            rows, columns = near.nonzero(as_tuple=True)
+            p.append(rows + start)
+            g.append(columns)
+        return torch.cat(p), torch.cat(g)
+
+
+def local_density(points, means, scales, quaternions, opacity, sigmas=SIGMAS, block=2**24):
+    """gaussian_density without the pairs beyond `sigmas`; the Gaussians given are the candidates near the points."""
     rotations = rotation(quaternions)
-    origin = torch.minimum(means.detach().min(0).values, points.min(0).values) - 1.0
-    for k, radius in enumerate(RADII):
-        members = (tier == k).nonzero().squeeze(1)
-        if not len(members):
-            continue
-        cells = torch.floor((means[members].detach() - origin) / radius).long()
-        keys = (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
-        order = keys.argsort()
-        keys = keys[order]
-        centre = torch.floor((points - origin) / radius).long()
-        shifts = torch.stack(torch.meshgrid(*[torch.arange(-1, 2, device=points.device)] * 3, indexing="ij"), -1).reshape(-1, 3)
-        query = (centre[:, None] + shifts[None]).clamp_min(0)  # [M, 27, 3]
-        qkeys = ((query[..., 0] << 42) | (query[..., 1] << 21) | query[..., 2]).reshape(-1)
-        start = torch.searchsorted(keys, qkeys, right=False)
-        count = torch.searchsorted(keys, qkeys, right=True) - start
-        total = int(count.sum())
-        if not total:
-            continue
-        p = torch.arange(len(points), device=points.device).repeat_interleave(27).repeat_interleave(count)
-        first = (count.cumsum(0) - count).repeat_interleave(count)
-        g = members[order[start.repeat_interleave(count) + torch.arange(total, device=points.device) - first]]
-        for a in range(0, total, chunk):
-            args = (points, means, rotations, scales, opacity, p[a:a + chunk], g[a:a + chunk])
-            value = value + (checkpoint(pair_density, *args, use_reentrant=False, preserve_rng_state=False)
-                             if torch.is_grad_enabled() else pair_density(*args))
-    return value
+    p, g = near_pairs(points, means, rotations, scales, sigmas, block)
+    return pair_density(points, means, rotations, scales, opacity, p, g)
 
 
 class DensityPrior:
+    REFRESH = 100  # iterations between candidate updates: the densification interval
+    MARGIN = 0.1   # [m] how far a candidate's reach may fall short of an object's probes, for motion between updates
+
     def __init__(self, config_file, device, weight, samples, log):
         self.cfg = json.loads(Path(config_file).read_text())
         cache = Path(config_file).parent / self.cfg["cache"]
@@ -95,32 +87,50 @@ class DensityPrior:
         self.points, self.target, self.confidence = [
             torch.as_tensor(data[k], device=device, dtype=torch.float32)
             for k in ("points", "target", "confidence")]
+        self.object = torch.as_tensor(data["object"], device=device, dtype=torch.long)  # per surface sample
         self.batch = samples
         self.weight = weight
         self.log = Path(log)
         assert self.points.shape[:-1] == self.target.shape == self.confidence.shape
         assert all(torch.isfinite(t).all() for t in (self.points, self.target, self.confidence))
         assert ((self.confidence >= 0) & (self.confidence <= 1)).all()
+        probes = [self.points[self.object == k].reshape(-1, 3) for k in range(int(self.object.max()) + 1 if len(self.object) else 0)]
+        self.boxes = [(p.min(0).values, p.max(0).values) for p in probes]
+        self.candidates, self.count = None, 0
+
+    def refresh(self, means, scales):
+        """Per object, the Gaussians whose reach may touch the box of its probes before the next update."""
+        with torch.no_grad():
+            reach = (2 * SIGMAS * scales.max(-1).values + self.MARGIN)[:, None]
+            self.candidates = [((means + reach >= low) & (means - reach <= high)).all(-1).nonzero().squeeze(1)
+                               for low, high in self.boxes]
+            self.count = len(means)
 
     def loss(self, gaussians, iteration):
         if not len(self.points):
             return gaussians.get_xyz.sum() * 0
+        means, scales = gaussians.get_xyz, gaussians.get_scaling
+        quaternions, opacity = gaussians.get_rotation, gaussians.get_opacity
+        if self.candidates is None or len(means) != self.count or iteration % self.REFRESH == 1:
+            self.refresh(means, scales)
         indices = (torch.arange(self.batch, device=self.points.device)
                    + (iteration - 1) * self.batch) % len(self.points)
-        points = self.points[indices].reshape(-1, 3)
-        target = self.target[indices].reshape(-1)
-        confidence = self.confidence[indices].reshape(-1)
+        owner = self.object[indices]
         started = time.perf_counter()
-        rho = culled_density(points, gaussians.get_xyz, gaussians.get_scaling,
-                             gaussians.get_rotation, gaussians.get_opacity)
-        # Fixed sample denominator: low confidence must reduce absolute influence.
-        loss = (confidence * (rho - target).square()).mean()
+        errors, densities = [], []
+        for k in owner.unique().tolist():
+            rows, near = indices[owner == k], self.candidates[k]
+            rho = local_density(self.points[rows].reshape(-1, 3), means[near], scales[near], quaternions[near], opacity[near])
+            # Fixed sample denominator: low confidence must reduce absolute influence.
+            errors.append(self.confidence[rows].reshape(-1) * (rho - self.target[rows].reshape(-1)).square())
+            densities.append(rho.detach())
+        loss = torch.cat(errors).mean()
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite density loss at {iteration}")
         if iteration == 1 or iteration % 100 == 0:
             entry = dict(iteration=iteration, raw=float(loss.detach()), weight=self.weight,
-                         mean_confidence=float(confidence.mean()), mean_density=float(rho.detach().mean()),
-                         gaussians=len(gaussians.get_xyz), points=len(points), seconds=round(time.perf_counter() - started, 4))
+                         mean_confidence=float(self.confidence[indices].mean()), mean_density=float(torch.cat(densities).mean()),
+                         gaussians=len(means), points=len(indices) * self.points.shape[1], seconds=round(time.perf_counter() - started, 4))
             with self.log.open("a") as f:
                 f.write(json.dumps(entry) + "\n")
             print("DENSITY", json.dumps(entry), flush=True)
