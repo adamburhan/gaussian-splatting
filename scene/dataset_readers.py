@@ -71,7 +71,7 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, depths_folder, test_cam_names_list, depth_unit):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, depths_folder, test_cam_names_list, depth_unit, masks_folder=""):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -88,6 +88,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
 
+        intrinsics = None
         if intr.model=="SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
@@ -97,6 +98,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
+            # ADAM CHANGE: the principal point of a PINHOLE camera need not be the image centre
+            intrinsics = dict(fx=focal_length_x, fy=focal_length_y, cx=intr.params[2], cy=intr.params[3], width=width, height=height)
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
@@ -114,7 +117,9 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=depth_params,
                               image_path=image_path, image_name=image_name, depth_path=depth_path,
-                              width=width, height=height, is_test=image_name in test_cam_names_list, depth_unit=depth_unit)
+                              width=width, height=height, is_test=image_name in test_cam_names_list, depth_unit=depth_unit,
+                              intrinsics=intrinsics,
+                              mask_path=os.path.join(masks_folder, f"{extr.name[:-n_remove]}.png") if masks_folder != "" else "")  # ADAM CHANGE
         cam_infos.append(cam_info)
 
     sys.stdout.write('\n')
@@ -145,7 +150,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8, depth_unit="encoded"):
+def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8, depth_unit="encoded", masks=""):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -201,7 +206,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8, 
     cam_infos_unsorted = readColmapCameras(
         cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
         images_folder=os.path.join(path, reading_dir), 
-        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list, depth_unit=depth_unit)
+        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list, depth_unit=depth_unit,
+        masks_folder=os.path.join(path, masks) if os.path.isdir(os.path.join(path, masks)) else "")  # ADAM CHANGE: loss masks, one PNG per image
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]

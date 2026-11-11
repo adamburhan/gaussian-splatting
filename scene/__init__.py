@@ -62,8 +62,8 @@ class Scene:
                 args.source_path, args.depths, args.dslr_folder,
                 train_images=args.train_images, train_sparse=args.train_sparse, train_masks=args.train_masks)
         elif os.path.exists(os.path.join(args.source_path, "sparse")):
-            # ADAM CHANGE: depth_unit forwarded to the COLMAP reader
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp, depth_unit=args.depth_unit)
+            # ADAM CHANGE: depth_unit and the mask folder (--train_masks) forwarded to the COLMAP reader
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp, depth_unit=args.depth_unit, masks=args.train_masks)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)
