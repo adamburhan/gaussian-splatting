@@ -22,7 +22,7 @@ import sys
 from scene import Scene, GaussianModel, read_completion
 from utils.general_utils import safe_state, get_expon_lr_func
 from utils.shape_loss import ShapePrior, LOSSES, target_mask, seed_colour, object_fit  # ADAM CHANGE
-from utils.density_prior import DensityPrior
+from utils.density_prior import density_prior as load_density_prior
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -58,8 +58,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.training_setup(opt)
     if dataset.density_prior and (dataset.shape or dataset.object_pose != "none"):
         raise ValueError("density and grid/pose constraints are separate experiment arms")
-    density_prior = DensityPrior(dataset.density_prior, "cuda", dataset.density_weight,
-                                 dataset.density_samples, os.path.join(dataset.model_path, "density_loss.jsonl")) if dataset.density_prior else None
+    density_prior = load_density_prior(dataset.density_prior, "cuda", dataset.density_weight,
+                                       dataset.density_samples, os.path.join(dataset.model_path, "density_loss.jsonl"),
+                                       pull_only=dataset.density_pull_only) if dataset.density_prior else None
     has_objects = bool(dataset.shape) and json.load(open(os.path.join(dataset.shape, "objects.json")))["objects"]
     shape_prior = ShapePrior(dataset.shape, dataset.shape_radius, dataset.shape_refresh, ownership=dataset.shape_ownership,
                              radius_scale=dataset.shape_radius_scale) if has_objects else None

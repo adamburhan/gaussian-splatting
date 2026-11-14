@@ -1,4 +1,5 @@
-"""Match Gaussian density to fixed mesh samples; test with pytest tests/test_density_prior.py."""
+"""Density priors from fixed mesh samples: DensityPrior matches the density at points, SummedPrior sums the opacity
+along normals."""
 import hashlib
 import json
 from pathlib import Path
@@ -135,3 +136,103 @@ class DensityPrior:
                 f.write(json.dumps(entry) + "\n")
             print("DENSITY", json.dumps(entry), flush=True)
         return self.weight * loss
+
+
+def line_opacity(origins, normals, tolerance, reach, end, means, scales, quaternions, opacity, fade=True, sigmas=SIGMAS, block=2**24):
+    """Per line (origin + t normal), the opacity it meets at the object and in free space. A Gaussian counts with its
+    opacity times its peak on the line, over the part of its extent along the line that lies at t in [-tolerance, end];
+    its share goes from the object to free space as t goes from tolerance to reach. Without `fade` the opacity met in
+    free space gives the opacities no gradient: a Gaussian leaves by moving in or thinning. The Gaussians given are
+    the candidates near the lines."""
+    with torch.no_grad():  # the (line, Gaussian) pairs that can count: the centre lies within `sigmas` scales of the stretch
+        centre = origins.mean(0)  # centred coordinates keep the products exact enough in float32
+        o, m, size = origins - centre, means - centre, sigmas * scales.max(-1).values
+        base = (o * normals).sum(-1)
+        line, g = [], []
+        step = max(1, block // max(len(m), 1))
+        for first in range(0, len(o), step):
+            rows = slice(first, first + step)
+            along = normals[rows] @ m.T - base[rows, None]
+            near = ((torch.cdist(o[rows], m).square() - along.square() <= size.square())
+                    & (along >= -tolerance[rows, None] - size) & (along <= end[rows, None] + size))
+            found = near.nonzero(as_tuple=True)
+            line.append(found[0] + first)
+            g.append(found[1])
+        line, g = torch.cat(line), torch.cat(g)
+    rotations, inverse = rotation(quaternions[g]), 1 / scales[g].clamp_min(1e-6)
+    offset = torch.einsum("pi,pij->pj", origins[line] - means[g], rotations) * inverse
+    direction = torch.einsum("pi,pij->pj", normals[line], rotations) * inverse
+    a = direction.square().sum(-1)
+    t = -(direction * offset).sum(-1) / a  # where on the line the Gaussian peaks [m from the surface]
+    peak = torch.exp(-0.5 * (offset.square().sum(-1) - a * t.square()).clamp_min(0))
+    # the Gaussian's extent along the line, at three points of its profile there (the centre and +-sqrt(3) widths,
+    # weights 2/3 and 1/6): the part of it that sticks out of the tolerance counts as free space
+    at = t[:, None] + a.rsqrt()[:, None] * t.new_tensor([-3 ** 0.5, 0.0, 3 ** 0.5])
+    counted = t.new_tensor([1 / 6, 2 / 3, 1 / 6]) * ((at >= -tolerance[line, None]) & (at <= end[line, None]))
+    outside = ((at - tolerance[line, None]) / (reach[line] - tolerance[line])[:, None]).clamp(0, 1)
+    met = opacity.reshape(-1)[g]
+    zeros = torch.zeros(len(origins), dtype=means.dtype, device=means.device)
+    # detached: a Gaussian leaves free space by fading, moving in or thinning along the line, not by dodging the lines
+    leaving = met if fade else met.detach()
+    return (zeros.index_add(0, line, met * peak * (counted * (1 - outside)).sum(-1)),
+            zeros.index_add(0, line, leaving * peak.detach() * (counted * outside).sum(-1)))
+
+
+class SummedPrior(DensityPrior):
+    """Along the normal through each surface sample of the prior (prior/density.py sample_lines), the opacity met within
+    the tolerance of the surface must reach 1 and the opacity met in the free stretch beyond it must be 0: per normal,
+    the squared shortfall of the first plus the second. `pull_only`: the second moves and thins Gaussians, never fades them."""
+
+    def __init__(self, config_file, device, weight, samples, log, pull_only=False):
+        self.cfg = json.loads(Path(config_file).read_text())
+        cache = Path(config_file).parent / self.cfg["cache"]
+        if hashlib.sha256(cache.read_bytes()).hexdigest() != self.cfg["cache_sha256"]:
+            raise ValueError("Density cache fingerprint mismatch")
+        data = np.load(cache)
+        self.points, self.normals, self.tolerance, self.reach, self.end, self.confidence = [
+            torch.as_tensor(data[k], device=device, dtype=torch.float32)
+            for k in ("points", "normals", "tolerance", "reach", "end", "weight")]
+        self.object = torch.as_tensor(data["object"], device=device, dtype=torch.long)
+        self.batch, self.weight, self.log, self.fade = samples, weight, Path(log), not pull_only
+        ends = torch.stack((self.points - self.tolerance[:, None] * self.normals, self.points + self.end[:, None] * self.normals))
+        self.boxes = [(ends[:, self.object == k].reshape(-1, 3).min(0).values, ends[:, self.object == k].reshape(-1, 3).max(0).values)
+                      for k in range(int(self.object.max()) + 1 if len(self.object) else 0)]
+        self.candidates, self.count = None, 0
+
+    def loss(self, gaussians, iteration):
+        if not len(self.points):
+            return gaussians.get_xyz.sum() * 0
+        means, scales = gaussians.get_xyz, gaussians.get_scaling
+        quaternions, opacity = gaussians.get_rotation, gaussians.get_opacity
+        if self.candidates is None or len(means) != self.count or iteration % self.REFRESH == 1:
+            self.refresh(means, scales)
+        indices = (torch.arange(self.batch, device=self.points.device)
+                   + (iteration - 1) * self.batch) % len(self.points)
+        owner = self.object[indices]
+        started = time.perf_counter()
+        errors, at_object, in_free = [], [], []
+        for k in owner.unique().tolist():
+            rows, near = indices[owner == k], self.candidates[k]
+            found, free = line_opacity(self.points[rows], self.normals[rows], self.tolerance[rows], self.reach[rows], self.end[rows],
+                                       means[near], scales[near], quaternions[near], opacity[near], self.fade)
+            errors.append(self.confidence[rows] * (torch.relu(1 - found).square() + free))
+            at_object.append(found.detach())
+            in_free.append(free.detach())
+        loss = torch.cat(errors).mean()
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Nonfinite density loss at {iteration}")
+        if iteration == 1 or iteration % 100 == 0:
+            entry = dict(iteration=iteration, raw=float(loss.detach()), weight=self.weight,
+                         at_object=float(torch.cat(at_object).mean()), in_free=float(torch.cat(in_free).mean()),
+                         gaussians=len(means), lines=len(indices), seconds=round(time.perf_counter() - started, 4))
+            with self.log.open("a") as f:
+                f.write(json.dumps(entry) + "\n")
+            print("DENSITY", json.dumps(entry), flush=True)
+        return self.weight * loss
+
+
+def density_prior(config_file, *arguments, pull_only=False):
+    """The loss a cache was prepared for: SummedPrior for normals, DensityPrior for points with targets."""
+    cfg = json.loads(Path(config_file).read_text())
+    lines = "normals" in np.load(Path(config_file).parent / cfg["cache"]).files
+    return SummedPrior(config_file, *arguments, pull_only=pull_only) if lines else DensityPrior(config_file, *arguments)

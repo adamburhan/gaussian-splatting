@@ -64,6 +64,7 @@ class ModelParams(ParamGroup):
         self.density_prior = ""
         self.density_weight = 0.1
         self.density_samples = 8
+        self.density_pull_only = False      # the summed prior moves Gaussians out of free space, never fades them
         self.completion_opacity = 0.9       # initial opacity (ordinary init points get 0.1)
         self.completion_thickness = 0.002    # scale along the normal [m]: a disc on the surface
         # ADAM CHANGE: which gradients the completion Gaussians receive. all: trained like any Gaussian;
