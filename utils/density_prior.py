@@ -234,9 +234,10 @@ class SummedPrior(DensityPrior):
 class OccupancyPrior:
     """The scene's occupancy and the prior meshes as fields on one grid (prior/density.py field), read at `samples`
     points drawn from every Gaussian, so a Gaussian counts over its extent. The opacity of the part of a Gaussian in
-    free space must be zero. The part within reach of a mesh is drawn to within the tolerance of its surface, where it
-    is left alone: the opacity is detached there, so the Gaussian moves and thins and never fades, and a part where the
-    capture measured surface is exempt."""
+    free space must be zero. The part within reach of a surface, measured or prior, pays its squared distance to it
+    (`near` is 1 on the surface and 0 at its reach); over the draws that is the squared distance of the centre plus the
+    Gaussian's variance along the surface normal. The opacity is detached there, so the Gaussian moves and flattens and
+    never fades."""
 
     def __init__(self, config_file, device, weight, samples, log):
         self.cfg = json.loads(Path(config_file).read_text())
@@ -244,18 +245,17 @@ class OccupancyPrior:
         if hashlib.sha256(cache.read_bytes()).hexdigest() != self.cfg["cache_sha256"]:
             raise ValueError("Density cache fingerprint mismatch")
         data = np.load(cache)
-        self.free, self.occupied, self.near = [
-            torch.as_tensor(data[k], device=device, dtype=torch.float32)[None, None] for k in ("free", "occupied", "near")]
+        self.free, self.near = [torch.as_tensor(data[k], device=device, dtype=torch.float32)[None, None] for k in ("free", "near")]
         self.origin = torch.as_tensor(data["origin"], device=device, dtype=torch.float32)
         self.voxel = float(data["voxel"])
         self.draws, self.weight, self.log = samples, weight, Path(log)
 
-    def read(self, volume, points, mode="bilinear"):
+    def read(self, volume, points):
         """`volume` at world points (N, K, 3), between its cell centres; zero outside the grid."""
         size = torch.tensor(volume.shape[2:], device=points.device)
         cell = (points - self.origin) / self.voxel - 0.5
         grid = (2 * cell / (size - 1) - 1).flip(-1)[None, None]  # grid_sample reads (z, y, x) for a volume indexed [x, y, z]
-        return torch.nn.functional.grid_sample(volume, grid, mode=mode, padding_mode="zeros", align_corners=True)[0, 0, 0]
+        return torch.nn.functional.grid_sample(volume, grid, mode="bilinear", padding_mode="zeros", align_corners=True)[0, 0, 0]
 
     def loss(self, gaussians, iteration):
         means, scales, opacity = gaussians.get_xyz, gaussians.get_scaling, gaussians.get_opacity.reshape(-1)
@@ -264,9 +264,8 @@ class OccupancyPrior:
         points = means[:, None] + torch.einsum("nij,nkj->nki", rotation(gaussians.get_rotation), scales[:, None] * noise)
         in_free = self.read(self.free, points).mean(1)
         near = self.read(self.near, points)
-        with torch.no_grad():
-            pulled = (near > 0) * (1 - self.read(self.occupied, points, "nearest"))
-        away = (pulled * (1 - near)).mean(1)
+        pulled = (near > 0).float()
+        away = (pulled * (1 - near) ** 2).mean(1)
         loss = (opacity * in_free).mean() + (opacity.detach() * away).mean()
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite density loss at {iteration}")
