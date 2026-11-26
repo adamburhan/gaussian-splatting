@@ -1,5 +1,5 @@
 """Density priors from fixed mesh samples: DensityPrior matches the density at points, SummedPrior sums the opacity
-along normals."""
+along normals. OccupancyPrior needs no samples: every Gaussian reads the scene's occupancy and the meshes as fields."""
 import hashlib
 import json
 from pathlib import Path
@@ -231,8 +231,64 @@ class SummedPrior(DensityPrior):
         return self.weight * loss
 
 
+class OccupancyPrior:
+    """The scene's occupancy and the prior meshes as fields on one grid (prior/density.py field), read at `samples`
+    points drawn from every Gaussian, so a Gaussian counts over its extent. The opacity of the part of a Gaussian in
+    free space must be zero. The part within reach of a mesh is drawn to within the tolerance of its surface, where it
+    is left alone: the opacity is detached there, so the Gaussian moves and thins and never fades, and a part where the
+    capture measured surface is exempt."""
+
+    def __init__(self, config_file, device, weight, samples, log):
+        self.cfg = json.loads(Path(config_file).read_text())
+        cache = Path(config_file).parent / self.cfg["cache"]
+        if hashlib.sha256(cache.read_bytes()).hexdigest() != self.cfg["cache_sha256"]:
+            raise ValueError("Density cache fingerprint mismatch")
+        data = np.load(cache)
+        self.free, self.occupied, self.near = [
+            torch.as_tensor(data[k], device=device, dtype=torch.float32)[None, None] for k in ("free", "occupied", "near")]
+        self.origin = torch.as_tensor(data["origin"], device=device, dtype=torch.float32)
+        self.voxel = float(data["voxel"])
+        self.draws, self.weight, self.log = samples, weight, Path(log)
+
+    def read(self, volume, points, mode="bilinear"):
+        """`volume` at world points (N, K, 3), between its cell centres; zero outside the grid."""
+        size = torch.tensor(volume.shape[2:], device=points.device)
+        cell = (points - self.origin) / self.voxel - 0.5
+        grid = (2 * cell / (size - 1) - 1).flip(-1)[None, None]  # grid_sample reads (z, y, x) for a volume indexed [x, y, z]
+        return torch.nn.functional.grid_sample(volume, grid, mode=mode, padding_mode="zeros", align_corners=True)[0, 0, 0]
+
+    def loss(self, gaussians, iteration):
+        means, scales, opacity = gaussians.get_xyz, gaussians.get_scaling, gaussians.get_opacity.reshape(-1)
+        started = time.perf_counter()
+        noise = torch.randn(len(means), self.draws, 3, device=means.device)
+        points = means[:, None] + torch.einsum("nij,nkj->nki", rotation(gaussians.get_rotation), scales[:, None] * noise)
+        in_free = self.read(self.free, points).mean(1)
+        near = self.read(self.near, points)
+        with torch.no_grad():
+            pulled = (near > 0) * (1 - self.read(self.occupied, points, "nearest"))
+        away = (pulled * (1 - near)).mean(1)
+        loss = (opacity * in_free).mean() + (opacity.detach() * away).mean()
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Nonfinite density loss at {iteration}")
+        if iteration == 1 or iteration % 100 == 0:
+            with torch.no_grad():
+                total = opacity.sum().clamp_min(1e-9)
+                entry = dict(iteration=iteration, raw=float(loss), weight=self.weight,
+                             opacity_in_free=float((opacity * in_free).sum() / total), gaussians_in_free=int((in_free > 0.5).sum()),
+                             opacity_pulled=float((opacity * pulled.mean(1)).sum() / total),
+                             away=float((opacity * away).sum() / (opacity * pulled.mean(1)).sum().clamp_min(1e-9)),
+                             gaussians=len(means), seconds=round(time.perf_counter() - started, 4))
+            with self.log.open("a") as f:
+                f.write(json.dumps(entry) + "\n")
+            print("DENSITY", json.dumps(entry), flush=True)
+        return self.weight * loss
+
+
 def density_prior(config_file, *arguments, pull_only=False):
-    """The loss a cache was prepared for: SummedPrior for normals, DensityPrior for points with targets."""
+    """The loss a cache was prepared for: OccupancyPrior for fields, SummedPrior for normals, DensityPrior for points
+    with targets."""
     cfg = json.loads(Path(config_file).read_text())
-    lines = "normals" in np.load(Path(config_file).parent / cfg["cache"]).files
-    return SummedPrior(config_file, *arguments, pull_only=pull_only) if lines else DensityPrior(config_file, *arguments)
+    files = np.load(Path(config_file).parent / cfg["cache"]).files
+    if "free" in files:
+        return OccupancyPrior(config_file, *arguments)
+    return SummedPrior(config_file, *arguments, pull_only=pull_only) if "normals" in files else DensityPrior(config_file, *arguments)
